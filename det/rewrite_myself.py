@@ -304,16 +304,16 @@ def main_no_preprocessing():
     }
     
 if __name__ == "__main__":
-    # try:
-    #     # Try to run complete pipeline with real image
-    #     result = main()
-    #     print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
-    # except Exception as e:
-    #     print(f"⚠️  Error with real image: {e}")
-    #     print("🔄 Running test with simulated data instead...")
-    #     test_pipeline_with_sample()
     try:
-        result = main_no_preprocessing()
-        print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")
+        # Try to run complete pipeline with real image
+        result = main()
+        print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
     except Exception as e:
-        print(f"⚠️  Error: {e}")
+        print(f"⚠️  Error with real image: {e}")
+        print("🔄 Running test with simulated data instead...")
+        test_pipeline_with_sample()
+    # try:
+    #     result = main_no_preprocessing()
+    #     print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")
+    # except Exception as e:
+    #     print(f"⚠️  Error: {e}")
