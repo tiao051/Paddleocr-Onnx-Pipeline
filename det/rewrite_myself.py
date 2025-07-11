@@ -235,12 +235,85 @@ def test_pipeline_with_sample():
     print("\n✅ Pipeline test completed!")
     return boxes, scores
 
+
+##test
+def main_no_preprocessing():
+    """
+    Pipeline để test mô hình OCR detection mà KHÔNG có preprocessing.
+    Ảnh gốc sẽ được resize thủ công về đúng input shape mà model cần,
+    nhưng KHÔNG normalize, KHÔNG chuẩn hóa mean/std như ImageNet.
+    """
+    image_path = "D:/Sozoo_Studio/v4_model/onnx_model/test/test.jpg"  
+    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/det_model.onnx"  
+
+    print("🚀 Running pipeline WITHOUT preprocessing...")
+    print("=" * 60)
+
+    # Step 1: Load image
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Không đọc được ảnh tại: {image_path}")
+    
+    original_h, original_w = img.shape[:2]
+    print(f"   Original size: {original_w}x{original_h}")
+
+    # Step 2: Resize ảnh trực tiếp về shape model cần (ví dụ [3, 640, 640])
+    target_h, target_w = 640, 640
+    resized_img = cv2.resize(img, (target_w, target_h))
+    input_tensor = resized_img.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32) / 255.0  # Không normalize mean/std
+
+    scale_h = target_h / original_h
+    scale_w = target_w / original_w
+
+    print(f"   Input tensor shape: {input_tensor.shape}")
+    print(f"   Scale ratios: height={scale_h:.3f}, width={scale_w:.3f}")
+
+    # Step 3: Run model
+    print("\n🧠 Running ONNX detection model...")
+    pred_map = run_detection_onnx(input_tensor, model_path)
+    prob_map = pred_map[0, 0]
+    print(f"   Probability map shape: {prob_map.shape}")
+    print(f"   Probability range: [{np.min(prob_map):.3f}, {np.max(prob_map):.3f}]")
+
+    # Step 4: Postprocess
+    print("\n🔍 Running DB postprocessing...")
+    postprocessor = DBPostProcessONNX(
+        thresh=0.3,
+        box_thresh=0.6,
+        max_candidates=1000,
+        unclip_ratio=1.5,
+        score_mode="fast",
+        box_type='quad'
+    )
+    boxes, scores = postprocessor(pred_map, [scale_h, scale_w])
+    print(f"   Detected boxes: {len(boxes)}")
+
+    if len(boxes) > 0:
+        print(f"   Confidence scores: {[f'{s:.3f}' for s in scores]}")
+        visualize_detection_results(img, boxes, scores, save_only=True)
+    else:
+        print("   ⚠️ No boxes detected")
+
+    print("\n✅ Pipeline without preprocessing completed!")
+    return {
+        'image': img,
+        'probability_map': prob_map,
+        'boxes': boxes,
+        'scores': scores,
+        'shape_info': (scale_h, scale_w)
+    }
+    
 if __name__ == "__main__":
+    # try:
+    #     # Try to run complete pipeline with real image
+    #     result = main()
+    #     print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
+    # except Exception as e:
+    #     print(f"⚠️  Error with real image: {e}")
+    #     print("🔄 Running test with simulated data instead...")
+    #     test_pipeline_with_sample()
     try:
-        # Try to run complete pipeline with real image
-        result = main()
-        print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
+        result = main_no_preprocessing()
+        print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")
     except Exception as e:
-        print(f"⚠️  Error with real image: {e}")
-        print("🔄 Running test with simulated data instead...")
-        test_pipeline_with_sample()
+        print(f"⚠️  Error: {e}")
