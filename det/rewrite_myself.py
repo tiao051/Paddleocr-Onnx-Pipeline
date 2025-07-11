@@ -4,13 +4,17 @@ import onnxruntime as ort
 import matplotlib.pyplot as plt
 from postprocessing_onnx import DBPostProcessONNX
 
-def resize_and_normalize_ppocrv5(img, target_size=960):
+def resize_and_normalize_ppocrv5(img, target_size=640):
+    """
+    PP-OCRv5 detection preprocessing - based on det_pp-ocrv5.yml config
+    YAML config: d2s_train_image_shape: [3, 640, 640]
+    """
     original_h, original_w = img.shape[:2]
     ratio = target_size / max(original_h, original_w)
     new_h = int(original_h * ratio)
     new_w = int(original_w * ratio)
 
-    # Round to nearest multiple of 32
+    # Round to nearest multiple of 32 (required by model architecture)
     new_h = max(32, int(np.round(new_h / 32)) * 32)
     new_w = max(32, int(np.round(new_w / 32)) * 32)
 
@@ -122,10 +126,10 @@ def main():
     # Step 4: Initialize postprocessor
     print("\n⚙️  Step 4: Initializing DB postprocessor...")
     postprocessor = DBPostProcessONNX(
-        thresh=0.3,           # Binary threshold
-        box_thresh=0.7,       # Confidence threshold  
-        max_candidates=1000,  # Max contours
-        unclip_ratio=2.0,     # Box expansion
+        thresh=0.3,           # Binary threshold (matches YAML)
+        box_thresh=0.6,       # Confidence threshold (matches YAML: 0.6)
+        max_candidates=1000,  # Max contours (matches YAML)
+        unclip_ratio=1.5,     # Box expansion (matches YAML: 1.5)
         score_mode="fast",    # Fast scoring method
         box_type='quad'       # Quadrilateral boxes
     )
@@ -207,10 +211,10 @@ def test_pipeline_with_sample():
     
     # Initialize postprocessor
     postprocessor = DBPostProcessONNX(
-        thresh=0.3,
-        box_thresh=0.7,
-        max_candidates=1000,
-        unclip_ratio=2.0,
+        thresh=0.3,           # Matches YAML config
+        box_thresh=0.6,       # Matches YAML config  
+        max_candidates=1000,  # Matches YAML config
+        unclip_ratio=1.5,     # Matches YAML config
         score_mode="fast",
         box_type='quad'
     )

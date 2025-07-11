@@ -18,9 +18,9 @@ class DBPostProcessONNX(object):
 
     def __init__(self,
                  thresh=0.3,         # Ngưỡng để tạo binary mask từ probability map
-                 box_thresh=0.7,     # Ngưỡng confidence để filter boxes
+                 box_thresh=0.6,     # Ngưỡng confidence để filter boxes (matches YAML)
                  max_candidates=1000, # Số lượng contours tối đa được xử lý
-                 unclip_ratio=2.0,   # Tỷ lệ mở rộng box để bao trọn text
+                 unclip_ratio=1.5,   # Tỷ lệ mở rộng box để bao trọn text (matches YAML)
                  use_dilation=False, # Có áp dụng morphological dilation không
                  score_mode="fast",  # Cách tính score: "fast" (bbox) vs "slow" (polygon)
                  box_type='quad',    # Loại box: 'quad' (4 điểm) vs 'poly' (đa giác)
@@ -28,8 +28,8 @@ class DBPostProcessONNX(object):
         
         # EXAMPLE VALUES - Hand tracing với những giá trị này:
         # thresh=0.3: pixel > 0.3 → white (1), pixel ≤ 0.3 → black (0)
-        # box_thresh=0.7: chỉ giữ boxes có confidence > 0.7
-        # unclip_ratio=2.0: mở rộng box gấp 2 lần để bao trọn text
+        # box_thresh=0.6: chỉ giữ boxes có confidence > 0.6 (matches YAML)
+        # unclip_ratio=1.5: mở rộng box gấp 1.5 lần để bao trọn text (matches YAML)
         
         self.thresh = thresh
         self.box_thresh = box_thresh
@@ -551,10 +551,10 @@ def test_db_postprocess_onnx():
     
     # STEP 3: Initialize postprocessor với PP-OCRv5 compatible settings
     postprocessor = DBPostProcessONNX(
-        thresh=0.3,           # Binary threshold
-        box_thresh=0.7,       # Confidence threshold  
-        max_candidates=1000,  # Max contours
-        unclip_ratio=2.0,     # Box expansion
+        thresh=0.3,           # Binary threshold (matches YAML)
+        box_thresh=0.6,       # Confidence threshold (matches YAML)
+        max_candidates=1000,  # Max contours (matches YAML)
+        unclip_ratio=1.5,     # Box expansion (matches YAML)
         score_mode="fast",    # Fast scoring method
         box_type='quad'       # Quadrilateral boxes
     )
