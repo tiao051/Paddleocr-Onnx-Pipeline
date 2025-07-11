@@ -111,12 +111,13 @@ class RecognitionONNX:
         # Return first output (predictions)
         return outputs[0]
     
-    def _decode_predictions(self, predictions: np.ndarray) -> List[str]:
+    def _decode_predictions(self, predictions: np.ndarray, verbose: bool = False) -> List[str]:
         """
         Decode CTC predictions to text strings
         
         Args:
             predictions: Model output (B, T, num_classes)
+            verbose: Print debug information
             
         Returns:
             List of recognized text strings
@@ -124,11 +125,20 @@ class RecognitionONNX:
         batch_size = predictions.shape[0]
         results = []
         
+        if verbose:
+            print(f"   🔍 Predictions shape: {predictions.shape}")
+            print(f"   🔍 Character dict size: {len(self.char_dict)}")
+        
         for i in range(batch_size):
             pred = predictions[i]  # (T, num_classes)
             
             # Get character indices (argmax)
             char_indices = np.argmax(pred, axis=1)  # (T,)
+            
+            if verbose:
+                print(f"   🔍 Sequence length: {len(char_indices)}")
+                print(f"   🔍 Unique indices: {np.unique(char_indices)[:10]}...")  # Show first 10
+                print(f"   🔍 Max confidence: {np.max(pred):.3f}")
             
             # CTC decoding: remove blanks and consecutive duplicates
             decoded_chars = []
@@ -142,11 +152,16 @@ class RecognitionONNX:
                 if char_idx != prev_char:  # Remove consecutive duplicates
                     if char_idx < len(self.char_dict):
                         decoded_chars.append(self.char_dict[char_idx])
+                        if verbose and len(decoded_chars) <= 5:  # Show first few chars
+                            print(f"   🔍 Decoded char: {char_idx} → '{self.char_dict[char_idx]}'")
                     prev_char = char_idx
             
             # Join characters to form text
             text = ''.join(decoded_chars)
             results.append(text)
+            
+            if verbose:
+                print(f"   🔍 Final text: '{text}' (length: {len(text)})")
             
         return results
     
@@ -167,7 +182,7 @@ class RecognitionONNX:
         predictions = self._run_inference(input_tensor)
         
         # Postprocessing
-        texts = self._decode_predictions(predictions)
+        texts = self._decode_predictions(predictions, verbose=True)
         
         return texts[0] if texts else ""
     
@@ -231,7 +246,15 @@ def test_recognition_onnx():
     print("=" * 60)
     
     # Initialize recognizer
-    model_path = "../models/rec_model.onnx"
+    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+
+    
+    # Check if model exists, if not try relative path
+    if not os.path.exists(model_path):
+        model_path = "models/rec_model.onnx"
+    if not os.path.exists(model_path):
+        model_path = "rec_model.onnx"
+    
     recognizer = RecognitionONNX(model_path)
     
     # Print model info
@@ -252,6 +275,19 @@ def test_recognition_onnx():
     except Exception as e:
         print(f"   ❌ Error in recognition: {e}")
         return
+    
+    # Test with synthetic text image
+    print(f"\n🧪 Testing with synthetic text image...")
+    try:
+        # Create a simple text image using OpenCV
+        text_img = np.ones((48, 320, 3), dtype=np.uint8) * 255  # White background
+        cv2.putText(text_img, "HELLO", (50, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+        
+        text_result = recognizer.recognize(text_img)
+        print(f"   Synthetic text recognition: '{text_result}'")
+        print(f"   Expected: 'HELLO' or similar")
+    except Exception as e:
+        print(f"   ❌ Error in synthetic text: {e}")
     
     # Test batch processing
     print(f"\n🧪 Testing batch processing...")
@@ -278,8 +314,18 @@ def demo_with_cropped_images():
     print("DEMO: RECOGNITION WITH CROPPED TEXT IMAGES")
     print("=" * 60)
     
-    # Initialize recognizer
-    model_path = "../models/rec_model.onnx"
+    # Initialize recognizer - fix path
+    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+    
+    # Check if model exists, if not try relative paths
+    if not os.path.exists(model_path):
+        model_path = "../models/rec_model.onnx"
+    if not os.path.exists(model_path):
+        model_path = "models/rec_model.onnx"
+    if not os.path.exists(model_path):
+        print(f"❌ Model not found! Please check if rec_model.onnx exists in models/ folder")
+        return
+    
     recognizer = RecognitionONNX(model_path)
     
     # Create simulated text region crops
