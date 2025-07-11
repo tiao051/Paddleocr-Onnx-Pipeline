@@ -1,21 +1,27 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
+import os
 from db_postprocess import DBPostProcess
 
+# Get the directory of this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)  # Go up one level from paddleocr_pipeline
+
 # Load models
-det_sess = ort.InferenceSession("det_model.onnx")
-rec_sess = ort.InferenceSession("rec_model.onnx")
+det_sess = ort.InferenceSession(os.path.join(project_root, "models", "det_model.onnx"))
+rec_sess = ort.InferenceSession(os.path.join(project_root, "models", "rec_model.onnx"))
 
 # Load image
-img = cv2.imread("test.jpg")
+img = cv2.imread(os.path.join(project_root, "test", "test.jpg"))
 if img is None:
     # Create a test image if not found
     img = np.ones((200, 600, 3), dtype=np.uint8) * 255
     cv2.putText(img, "Hello World", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
     cv2.putText(img, "PaddleOCR Test", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
     cv2.putText(img, "ONNX Model", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-    cv2.imwrite("test.jpg", img)
+    os.makedirs(os.path.join(project_root, "test"), exist_ok=True)
+    cv2.imwrite(os.path.join(project_root, "test", "test.jpg"), img)
 
 ori_img = img.copy()
 orig_h, orig_w = img.shape[:2]
