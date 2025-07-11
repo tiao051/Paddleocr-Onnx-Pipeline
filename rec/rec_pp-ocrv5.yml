@@ -73,45 +73,6 @@ Metric:
   name: RecMetric
   main_indicator: acc
 
-Train:
-  dataset:
-    name: MultiScaleDataSet
-    ds_width: false
-    data_dir: ./train_data/
-    ext_op_transform_idx: 1
-    label_file_list:
-    - ./train_data/train_list.txt
-    transforms:
-    - DecodeImage:
-        img_mode: BGR
-        channel_first: false
-    - RecConAug:
-        prob: 0.5
-        ext_data_num: 2
-        image_shape: [48, 320, 3]
-        max_text_length: *max_text_length
-    - RecAug:
-    - MultiLabelEncode:
-        gtc_encode: NRTRLabelEncode
-    - KeepKeys:
-        keep_keys:
-        - image
-        - label_ctc
-        - label_gtc
-        - length
-        - valid_ratio
-  sampler:
-    name: MultiScaleSampler
-    scales: [[320, 32], [320, 48], [320, 64]]
-    first_bs: &bs 128
-    fix_bs: false
-    divided_factor: [8, 16] # w, h
-    is_training: True
-  loader:
-    shuffle: true
-    batch_size_per_card: *bs
-    drop_last: true
-    num_workers: 8
 Eval:
   dataset:
     name: SimpleDataSet
