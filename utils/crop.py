@@ -80,8 +80,6 @@ def order_points_clockwise(pts):
 
     return np.array([top_two[0], top_two[1], bottom_two[0], bottom_two[1]], dtype=np.float32)
 
-
-# utils/sort_utils.py
 def sort_boxes_top_to_bottom_left_to_right(boxes, y_thresh=10):
     """
     Sắp xếp các box theo thứ tự đọc: trên xuống dưới, trái qua phải.

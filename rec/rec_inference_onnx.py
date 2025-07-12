@@ -13,7 +13,7 @@ import numpy as np
 import onnxruntime as ort
 import os
 from typing import Union, List, Tuple
-from rec_preprocessing_onnx import preprocess_ppocrv5, preprocess_ppocrv5_batch
+from rec.rec_preprocessing_onnx import preprocess_ppocrv5, preprocess_ppocrv5_batch
 
 
 class RecognitionONNX:

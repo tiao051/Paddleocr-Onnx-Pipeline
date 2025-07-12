@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import matplotlib.pyplot as plt
+import datetime
+import os
 from det.postprocessing_onnx import DBPostProcessONNX
 
 def resize_and_normalize_ppocrv5(img, target_size=640):
@@ -59,7 +61,6 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
     """
     Visualize detection results by drawing bounding boxes on image
     """
-    import datetime
     result_img = img.copy()
     
     for i, (box, score) in enumerate(zip(boxes, scores)):
@@ -76,10 +77,11 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
                    (int(box[0][0]), int(box[0][1]) - 5),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     
-    # Save result
+    # Save result to output directory
+    os.makedirs("output", exist_ok=True)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
     filename = now.strftime("detection_result_%Y%m%d_%H%M%S.jpg")
-    output_path = filename
+    output_path = os.path.join("output", filename)
     cv2.imwrite(output_path, result_img)
     print(f"   Result saved to: {output_path}")
     
