@@ -143,13 +143,16 @@ def preprocess_ppocrv5_batch(image_list: List[Union[str, np.ndarray]]):
         wh_ratio = w / float(h)
         max_wh_ratio = max(max_wh_ratio, wh_ratio)
     
+    dynamic_width = int((imgH * max_wh_ratio))
+    dynamic_rec_shape = (imgC, imgH, dynamic_width)
+    
     # Process all images with same max_wh_ratio
     norm_img_batch = []
     for i in range(img_num):
         img_idx = indices[i]
         img = loaded_images[img_idx]
         
-        norm_img = resize_norm_img_ppocrv5(img, max_wh_ratio, rec_image_shape)
+        norm_img = resize_norm_img_ppocrv5(img, max_wh_ratio, dynamic_rec_shape)
         norm_img_batch.append(norm_img[np.newaxis, :])
     
     # Concatenate batch

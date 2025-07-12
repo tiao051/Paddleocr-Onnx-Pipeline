@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import matplotlib.pyplot as plt
-from postprocessing_onnx import DBPostProcessONNX
+from det.postprocessing_onnx import DBPostProcessONNX
 
 def resize_and_normalize_ppocrv5(img, target_size=640):
     """
@@ -59,6 +59,7 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
     """
     Visualize detection results by drawing bounding boxes on image
     """
+    import datetime
     result_img = img.copy()
     
     for i, (box, score) in enumerate(zip(boxes, scores)):
@@ -76,7 +77,9 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     
     # Save result
-    output_path = "detection_result.jpg"
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    filename = now.strftime("detection_result_%Y%m%d_%H%M%S.jpg")
+    output_path = filename
     cv2.imwrite(output_path, result_img)
     print(f"   Result saved to: {output_path}")
     
@@ -302,16 +305,31 @@ def main_no_preprocessing():
         'scores': scores,
         'shape_info': (scale_h, scale_w)
     }
-    
-if __name__ == "__main__":
+
+def main_det_run():
     try:
-        # Try to run complete pipeline with real image
         result = main()
         print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
+        return result['image'], result['boxes']  # ✅ Return image + boxes
     except Exception as e:
         print(f"⚠️  Error with real image: {e}")
         print("🔄 Running test with simulated data instead...")
         test_pipeline_with_sample()
+        return None, None  # ✅ Trả về cặp None để tránh unpack lỗi
+    # try:
+    #     result = main_no_preprocessing()
+    #     print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")
+    # except Exception as e:
+    #     print(f"⚠️  Error: {e}")
+# if __name__ == "__main__":
+#     try:
+#         # Try to run complete pipeline with real image
+#         result = main()
+#         print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
+#     except Exception as e:
+#         print(f"⚠️  Error with real image: {e}")
+#         print("🔄 Running test with simulated data instead...")
+#         test_pipeline_with_sample()
     # try:
     #     result = main_no_preprocessing()
     #     print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")

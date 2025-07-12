@@ -65,3 +65,43 @@ def crop_text_regions(img, boxes):
         cropped_images.append(crop_img)
     
     return cropped_images
+
+def order_points_clockwise(pts):
+    """
+    Reorder 4 points to: top-left, top-right, bottom-right, bottom-left
+    Giả định rằng box là hình tứ giác lồi không tự cắt nhau
+    """
+    # Sort theo y tăng (trên → dưới)
+    pts = sorted(pts, key=lambda x: x[1])
+
+    # Lấy 2 điểm trên đầu (top)
+    top_two = sorted(pts[:2], key=lambda x: x[0])  # theo x tăng: trái → phải
+    bottom_two = sorted(pts[2:], key=lambda x: x[0], reverse=True)  # phải → trái
+
+    return np.array([top_two[0], top_two[1], bottom_two[0], bottom_two[1]], dtype=np.float32)
+
+
+# utils/sort_utils.py
+def sort_boxes_top_to_bottom_left_to_right(boxes, y_thresh=10):
+    """
+    Sắp xếp các box theo thứ tự đọc: trên xuống dưới, trái qua phải.
+    - `y_thresh`: Ngưỡng chênh lệch Y để coi là cùng 1 dòng.
+    """
+    # Step 1: Sort theo Y rồi theo X
+    boxes = sorted(boxes, key=lambda box: (min(pt[1] for pt in box), min(pt[0] for pt in box)))
+
+    # Step 2: Gom các box vào dòng rồi sort trong dòng
+    lines = []
+    current_line = [boxes[0]]
+    for b in boxes[1:]:
+        y_current = min(pt[1] for pt in current_line[-1])
+        y_b = min(pt[1] for pt in b)
+        if abs(y_b - y_current) < y_thresh:
+            current_line.append(b)
+        else:
+            lines.append(sorted(current_line, key=lambda box: min(pt[0] for pt in box)))
+            current_line = [b]
+    lines.append(sorted(current_line, key=lambda box: min(pt[0] for pt in current_line)))
+
+    # Flatten về 1 list
+    return [box for line in lines for box in line]

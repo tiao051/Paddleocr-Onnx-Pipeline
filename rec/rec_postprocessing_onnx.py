@@ -7,7 +7,7 @@ Converts CTC model output to text strings
 
 import numpy as np
 from typing import List, Tuple
-
+import os
 
 class CTCLabelDecodeONNX:
     """
@@ -106,22 +106,34 @@ class CTCLabelDecodeONNX:
             
         batch_size = preds.shape[0]
         
+        if len(preds.shape) == 3:
+            exp_preds = np.exp(preds - np.max(preds, axis=-1, keepdims=True))
+            probs = exp_preds / np.sum(exp_preds, axis=-1, keepdims=True)
+        else:
+            probs = preds
         # Get predicted indices using argmax
-        preds_idx = np.argmax(preds, axis=2)  # (batch_size, seq_len)
+        preds_idx = np.argmax(probs, axis=2)  # (batch_size, seq_len)
         
         # Calculate confidence scores
-        preds_prob = np.max(preds, axis=2)    # (batch_size, seq_len)
-        
+        max_probs = np.max(probs, axis=2)    # (batch_size, seq_len)
+
         results = []
         for i in range(batch_size):
             # Decode CTC for this sequence
             text = self.decode_ctc(preds_idx[i])
+            sequence_probs = []
+            prev_idx = -1
+            for j, idx in enumerate(preds_idx[i]):
+            # Only consider non-blank and non-duplicate characters
+                if idx != 0 and idx != prev_idx:  # 0 is blank token
+                    sequence_probs.append(max_probs[i][j])
+                prev_idx = idx
+            if sequence_probs:
+                confidence = float(np.mean(sequence_probs))
+            else:
+                confidence = 0.0
             
-            # Calculate average confidence (excluding blank predictions)
-            valid_probs = preds_prob[i][preds_idx[i] != 0]
-            confidence = np.mean(valid_probs) if len(valid_probs) > 0 else 0.0
-            
-            results.append((text, float(confidence)))
+        results.append((text, confidence))
             
         return results
 
