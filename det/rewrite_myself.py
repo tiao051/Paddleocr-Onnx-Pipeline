@@ -100,7 +100,7 @@ def main():
     Complete OCR detection pipeline:
     Image → Preprocessing → ONNX Detection → Postprocessing → Final Boxes
     """
-    image_path = "D:/Sozoo_Studio/v4_model/onnx_model/test/test.jpg"  
+    image_path = "D:/Sozoo_Studio/v4_model/onnx_model/test/test1.jpg"  
     model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/det_model.onnx"  
 
     print("🚀 Starting complete OCR detection pipeline...")
