@@ -236,6 +236,39 @@ img = np.expand_dims(img, axis=0)
 Trong PaddleOCR, batch dimension được thêm tự động ở tầng `loader:`.  
 Tuy nhiên, khi viết pipeline inference ONNX riêng, bạn **phải thêm thủ công** batch `[1, C, H, W]`trước khi đưa vào `session.run()`, nếu không sẽ gặp lỗi shape.
 
+
+## 2.1.2 Detection Inference (PP-OCRv5 det.onnx – DB Algorithm)
+Sau khi ảnh đầu vào đã được tiền xử lý thành tensor [1, 3, 640, 640], bước tiếp theo là chạy mô hình PP-OCRv5_mobile_det.onnx bằng ONNX Runtime để sinh ra DB probability map — bản đồ xác suất vùng chứa văn bản.
+
+Tổng quan pipeline:
+
+[Preprocessed Image: [1, 3, 640, 640]]
+        ↓
+[Run ONNX Session]
+        ↓
+[Output: [1, 1, 160, 160] (DB Probability Map)]
+        ↓
+→ Gửi sang bước Postprocessing
+
+## 1. Mô hình sử dụng
+Model: PP-OCRv5_mobile_det.onnx
+Backbone: PPLCNetV3
+Detection Head: DB Head (Differentiable Binarization)
+Input shape:	[1, 3, 640, 640]
+Output shape:	[1, 1, 160, 160]
+Stride:	4 (do downsampling qua backbone)
+Output Type:	DB Probability Map (chưa sigmoid)
+
+## 2. Mục tiêu
+  - Nhận ảnh đầu vào đã tiền xử lý [1, 3, 640, 640]
+  - Chạy mô hình detection trên ONNX Runtime
+  - Trả về bản đồ xác suất chứa text (DB Map) với shape [H, W]
+  - Làm đầu vào cho hậu xử lý DB Head
+
+## 3. Cách hoạt động của mô hình
+  - DB Head không trực tiếp sinh bounding box
+  - Thay vào đó, nó sinh ra 1 bản đồ có shape [1, 1, 160, 160] thể hiện xác suất mỗi pixel là text
+  - Cần postprocessing để biến map này thành các polygon box chứa text
 ## 3. Thành phần chi tiết
 
 ### 3.1 Detection Model (PP-OCRv5\_mobile\_det)
