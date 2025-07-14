@@ -238,7 +238,7 @@ Tuy nhiên, khi viết pipeline inference ONNX riêng, bạn **phải thêm th�
 
 
 ## 2.1.2 Detection Inference (PP-OCRv5 det.onnx – DB Algorithm)
-Sau khi ảnh đầu vào đã được tiền xử lý thành tensor [1, 3, 640, 640], bước tiếp theo là chạy mô hình PP-OCRv5_mobile_det.onnx bằng ONNX Runtime để sinh ra DB probability map — bản đồ xác suất vùng chứa văn bản.
+Sau khi ảnh đầu vào đã được tiền xử lý thành tensor [1, 3, 640, 640], bước tiếp theo là chạy mô hình ``PP-OCRv5_mobile_det.onnx`` bằng ONNX Runtime để sinh ra DB probability map — bản đồ xác suất vùng chứa văn bản làm, nền tảng cho bước Postprocessing → decode polygon box.
 
 Tổng quan pipeline:
 
@@ -250,25 +250,147 @@ Tổng quan pipeline:
         ↓
 → Gửi sang bước Postprocessing
 
-## 1. Mô hình sử dụng
-Model: PP-OCRv5_mobile_det.onnx
-Backbone: PPLCNetV3
-Detection Head: DB Head (Differentiable Binarization)
-Input shape:	[1, 3, 640, 640]
-Output shape:	[1, 1, 160, 160]
-Stride:	4 (do downsampling qua backbone)
-Output Type:	DB Probability Map (chưa sigmoid)
+**Mục tiêu** 
+Sinh ra một bản đồ xác suất cho toàn ảnh. Mỗi pixel trong map tương ứng với xác suất "vùng đó chứa text".
 
-## 2. Mục tiêu
-  - Nhận ảnh đầu vào đã tiền xử lý [1, 3, 640, 640]
-  - Chạy mô hình detection trên ONNX Runtime
-  - Trả về bản đồ xác suất chứa text (DB Map) với shape [H, W]
-  - Làm đầu vào cho hậu xử lý DB Head
+**Tư tưởng kiến trúc DB Text Detection**
+- Khác với các phương pháp detection truyền thống (SSD, YOLO, FasterRCNN) vốn học cách regress toạ độ bounding box trực tiếp, DB (Differentiable Binarization) học một bản đồ phân đoạn nhị phân (binary segmentation map) cho chữ.
+- Lý do chọn segmentation:
+  - Text có thể rất mảnh, nối liền, độ dài khác nhau, hoặc không có hình chữ nhật cố định.
+  - Box regression dễ sai khi gặp text xiên, dài hoặc quá gần nhau.
+  - Phân đoạn ra vùng chữ cho phép xử lý linh hoạt hơn với các hậu xử lý như polygon fitting.
 
-## 3. Cách hoạt động của mô hình
-  - DB Head không trực tiếp sinh bounding box
-  - Thay vào đó, nó sinh ra 1 bản đồ có shape [1, 1, 160, 160] thể hiện xác suất mỗi pixel là text
-  - Cần postprocessing để biến map này thành các polygon box chứa text
+## 1. Input & Output Shape
+- Input: [1, 3, 640, 640] -> Ảnh RGB đã resize, normalize, CHW format, thêm batch dimension
+  - 1: batch size
+  - 3: RGB
+  - 640x640: ảnh đã resize
+- Output: [1, 1, 160, 160] -> DB map (1 channel), mỗi pixel là xác suất của một vùng chứa văn bản trong ảnh
+  - 1: batch size
+  - 1: single channel — probability map
+  - 160x160: spatial map (do stride tổng = 4)
+
+## 2. Cấu trúc nội tại của mô hình PP-OCRv5_mobile_det.onnx
+Mô hình chia thành 3 phần chính:
+  - Backbone: PPLCNetV3 -> Trích xuất đặc trưng từ ảnh
+  - Neck: RSEFPN -> Tổng hợp multi-scale features
+  - Head: DBHead -> Dự đoán bản đồ xác suất vùng chứa chữ
+
+## 2.1 PPLCNetV3
+  - Là backbone nhẹ, thiết kế dành cho mobile.
+  - Sử dụng nhiều Depthwise Separable Convs, kết hợp SE modules.
+  - Feature maps được trích xuất ở các tầng stride = {1, 2, 4, 8...}.
+
+PaddleOCR lấy output tại stride=4: nghĩa là ảnh input 640x640 sẽ sinh ra feature 160x160 (giảm 4 lần).
+
+**Tại sao lại lấy output tại stride=4?**
+1. Text trong ảnh có kích thước rất nhỏ
+  - Trong ảnh tự nhiên (billboard, hóa đơn, biển hiệu...), các ký tự có thể chỉ chiếm vài pixel.
+  - Nếu trích xuất feature từ tầng stride=8 hoặc stride=16:
+    - Pixel trong feature map đại diện cho vùng 8×8 hoặc 16×16 trong ảnh gốc
+    - Rất dễ mất chi tiết chữ nhỏ, đặc biệt là các nét mảnh, những nét dấu nhỏ...
+
+2. DB algorithm cần độ phân giải cao để tạo biên rõ ràng
+  - DB không học box, mà học biên chữ (boundary-aware).
+  - Càng có nhiều pixel ở gần biên, segmentation map càng chính xác.
+  - Nếu dùng stride cao → hình dạng chữ sẽ bị co méo → polygon fitting sẽ sai.
+→ Độ phân giải cao ở output (160x160) giúp hậu xử lý (DBPostProcess) detect được hình dạng chữ sát thực tế hơn.
+
+3. Tối ưu giữa độ chính xác và chi phí tính toán
+  - Nếu lấy feature tại stride=1 hoặc 2 → output sẽ là 640×640 hoặc 320×320 → cực kỳ nặng.
+  - Stride=4 là điểm cân bằng tốt:
+    - Vẫn giữ được chi tiết
+    - Vẫn đủ nhẹ cho inference real-time, đặc biệt trên mobile
+  → Đó là lý do PP-OCRv5_mobile_det dùng PPLCNetV3 + feature ở stride=4
+
+## 2.2 RSEFPN — Residual Squeeze-and-Excitation Feature Pyramid Network
+
+**Vai trò**
+Là "neck" của mô hình, RSEFPN có nhiệm vụ:
+  - Kết hợp các feature map từ nhiều tầng (multi-scale)
+  - Tăng khả năng nhận diện chữ ở nhiều kích cỡ
+  - Không làm thay đổi độ phân giải không gian (giữ nguyên [160, 160])
+
+**Tại sao phải dùng FPN?**
+  - Text trong ảnh có thể rất nhỏ hoặc lớn tùy ngữ cảnh.
+  - Backbone tạo ra feature ở nhiều cấp độ, mỗi cấp mạnh ở 1 loại chữ:
+    - Feature sâu → mạnh với object lớn
+    - Feature nông → tốt cho chi tiết nhỏ
+  → Nếu chỉ dùng 1 cấp → sẽ fail 1 nhóm chữ nào đó.
+
+**FPN giải quyết thế nào?**
+  - Top-down + lateral connections: lấy feature từ nhiều tầng → resize → align → sum lại
+  - Làm cho mô hình "nhìn được cùng lúc" các scale khác nhau của text
+
+**Tại sao gọi là RSE*FPN?**
+  - PaddleOCR thêm Squeeze-and-Excitation (SE) blocks để học được importance của từng channel
+  - "Residual" = thêm shortcut connection → giúp gradient ổn định hơn
+
+**Output**
+  - Output feature giữ nguyên kích thước: [1, C, 160, 160]
+  - Channel C được tổng hợp từ nhiều tầng, nhưng spatial vẫn là stride=4
+  → Sẵn sàng đưa vào DBHead để sinh map xác suất
+
+## 2.3 DBHead — Phân đoạn chữ bằng mô hình nhẹ
+
+**Vai trò**
+- Dự đoán một probability map, mỗi pixel ∈ [0, 1], là xác suất pixel đó thuộc về vùng chữ.
+- Không giống các object detector thông thường (YOLO, SSD...) học toạ độ box, DBHead học rìa chữ bằng segmentation.
+
+**Kiến trúc đơn giản**
+  Conv 3×3 → BatchNorm → ReLU → Conv 1×1 → Sigmoid
+Cụ thể:
+  - Conv 3×3	Học local features
+  - BN + ReLU	Normalize, nonlinear
+  - Conv 1×1	Giảm về 1 channel
+  - Sigmoid	Đưa output ∈ [0,1] — xác suất chữ
+
+**Tại sao dùng segmentation thay vì box?**
+- Chữ thường dính sát, xoay nghiêng, dài không đều, rất khó dùng box để bao
+- DBHead được thiết kế để:
+  - Dự đoán pixel-level, chứ không object-level
+  - Học được vùng biên mềm → càng gần biên càng chắc chắn
+  - Sau đó hậu xử lý bằng threshold → mask → polygon
+
+**Boundary-Aware Training (DB)**
+- DB paper dùng Differentiable Binarization (DB):
+  - Dự đoán 2 map: prob_map, threshold_map
+  - Áp dụng sigmoid(b(x)) → "soft binarization"
+  - PaddleOCR V5 tối giản chỉ dùng 1 map (prob_map), hậu xử lý cứng (DBPostProcess)
+→ Vẫn giữ được hiệu quả nhưng inference nhanh hơn
+
+Ref: https://github.com/PaddlePaddle/PaddleOCR/blob/main/configs/det/PP-OCRv5/PP-OCRv5_mobile_det.yml
+     https://github.com/PaddlePaddle/PaddleOCR/blob/main/ppocr/modeling/backbones/det_mobilenet_v3.py
+
+## 3 ONNXRuntime Inference
+Dưới đây là đoạn code mô phỏng cách thực thi mô hình:
+```python
+import onnxruntime as ort
+
+session = ort.InferenceSession("PP-OCRv5_mobile_det.onnx")
+input_name = session.get_inputs()[0].name
+
+output = session.run(None, {input_name: input_tensor})
+```
+Thông tin tensor:
+```python
+  - input_tensor: np.ndarray — shape [1, 3, 640, 640], dtype float32
+  - output[0]: np.ndarray — shape [1, 1, 160, 160], dtype float32
+```
+
+## 4. Vì sao output là [1, 1, 160, 160]?
+  - Mô hình chỉ downsample input duy nhất 4 lần (stride=4) → tránh mất thông tin hình dạng chữ.
+  - RSEFPN và DBHead giữ nguyên kích thước → không có upsample/downsample thêm.
+  - Output cuối là 1 channel từ DBHead: Conv → Sigmoid
+  → Mỗi pixel trong map là 1 điểm trên ảnh feature 160x160, tương ứng với vùng 4×4 trong ảnh gốc 640x640.
+
+## 5. Ý nghĩa của DB Map
+  - Output: [1, 1, 160, 160]
+    - Là một heatmap xác suất nhị phân
+    - Giá trị gần 1: vùng nhiều khả năng chứa text
+    - Giá trị gần 0: background
+  - Chưa thể dùng trực tiếp — cần qua hậu xử lý.
+  
 ## 3. Thành phần chi tiết
 
 ### 3.1 Detection Model (PP-OCRv5\_mobile\_det)
