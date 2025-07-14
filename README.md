@@ -26,7 +26,6 @@ Input Image
 Mục tiêu của bước này là xác định vùng có chứa chữ trong ảnh đầu vào, dưới dạng box 4 điểm.
 
 #### 2.1.1 Detection Preprocessing
-
 Trước khi đưa ảnh vào mô hình `PP-OCRv5_mobile_det.onnx`, ảnh cần được biến đổi về định dạng, tỷ lệ và kiểu dữ liệu để đảm bảo khớp hoàn toàn với pipeline huấn luyện gốc. Việc này đảm bảo mô hình hoạt động chính xác, tránh lỗi shape hoặc sai lệch khi suy luận (inference).
 
 Quy trình tiền xử lý bao gồm 5 bước chính như sau:
@@ -419,7 +418,6 @@ PostProcess:
   box_thresh: 0.6
   max_candidates: 1000
   unclip_ratio: 1.5
----
 
 ##### 1. Binary Thresholding
 
@@ -711,154 +709,79 @@ Scale to Original Image là bước cuối cùng trong DBPostProcess, đảm b�
 - DBPostProcess là bước **quan trọng nhất** quyết định chất lượng detection
 - Các tham số `thresh`, `box_thresh`, `unclip_ratio` cần tune theo từng loại ảnh
 - Trade-off giữa speed và accuracy: fast mode vs slow mode scoring
-## 3. Thành phần chi tiết
 
-### 3.1 Detection Model (PP-OCRv5\_mobile\_det)
+### 2.2 Crop Text Regions (Perspective Crop)
 
-* **Kiến trúc chính**: DB (Differentiable Binarization)
-* **Backbone**: PPLCNetV3, scale=0.75
-* **Neck**: RSEFPN, 96 kênh, shortcut=True
-* **Head**: DBHead, k=50, fix\_nan=True
-* **Input**: \[1, 3, 640, 640]
-* **Output**: Probability map \[1, 1, H, W]
+**Mục đích:**  
+Cắt từng vùng text từ ảnh gốc dựa trên box 4 điểm đã detect, chuẩn hóa orientation để chuẩn bị cho bước recognition.
 
-#### Vì sao chọn DB:
+**Pipeline**
+[Original Image] + [List of 4-point Boxes]
+        ↓
+[Perspective Transform]
+        ↓
+→ Output: List of Cropped Patches (rectified text regions)
 
-* Phù hợp với bài toán segment vùng text (thay vì detect box cứng)
-* Kết quả ra dạng mask → dễ postprocess thành box chính xác
+**Lý thuyết & Toán học:**  
+Mỗi box là một polygon 4 điểm (quadrilateral), có thể nghiêng, méo hoặc không song song trục ảnh, không thể dùng trực tiếp cho recognition.
+  - Recognition model (như CRNN, SVTR) chỉ hoạt động tốt khi chữ nằm ngang, vuông góc.
+  - Nếu crop bằng bounding box hoặc clip đơn thuần → chữ bị méo hình học, dẫn đến rec lỗi.
+  - Việc biến đổi hình học (rectification) là cần thiết để đưa vùng chữ về mặt phẳng Euclidean.
 
-### 3.2 Recognition Model (PP-OCRv5\_mobile\_rec)
+**Các bước thực hiện:**
+1. **Input: Box 4 điểm (quadrilateral)**
+Mỗi box là 1 polygon gồm 4 điểm: [x1, y1], [x2, y2], [x3, y3], [x4, y4], đi theo thứ tự top-left → clockwise.
+Các điểm này biểu diễn 4 đỉnh của vùng chữ đã phát hiện (có thể nghiêng/lệch).
+2. Tư duy hình học: từ tứ giác → hình chữ nhật phẳng
+  - Một tứ giác trong ảnh là biểu diễn perspective projection của một vùng chữ nằm ngang.
+  - Để khôi phục chữ về dạng "ngay ngắn", ta cần tìm một phép biến đổi hình học đưa 4 điểm này về hình chữ nhật phẳng.
 
-* **Kiến trúc chính**: SVTR\_LCNet
-* **Backbone**: PPLCNetV3, scale=0.95
-* **Head**: MultiHead (CTCHead + NRTRHead)
-* **SVTR Neck**: dims=120, depth=2, hidden\_dims=120
-* **Input**: \[1, 3, 48, variable-width]
-* **Output**: Sequence \[1, T, vocab\_size]
-* **Giới hạn độ dài**: max\_text\_length = 25
+Đây là bài toán đồng nhất perspective giữa 2 hệ tọa độ:
+| Gốc ảnh                | Đích phẳng (chuẩn) |
+| ---------------------- | ------------------ |
+| `[x1, y1]` (top-left)  | `[0, 0]`           |
+| `[x2, y2]` (top-right) | `[w - 1, 0]`       |
+| `[x3, y3]` (bot-right) | `[w - 1, h - 1]`   |
+| `[x4, y4]` (bot-left)  | `[0, h - 1]`       |
 
-#### Vì sao dùng SVTR\_LCNet:
+  - Với w, h là width/height thực tế của box, tính bằng độ dài cạnh.
+  - Kết quả: vùng ảnh chữ được cắt ra, căn thẳng, không lệch trục.
 
-* Kết hợp CNN (LCNet) với self-attention (SVTR) → nhẹ, chính xác
-* Phù hợp thiết bị mobile, inference nhanh
+3. Output: List các patch ảnh chứa chữ (rectified patches)
+  - Mỗi patch có hình chữ nhật, kích thước tự do (tùy theo box).
+  - Dùng cho bước tiếp theo: Resize + Normalize (Recognition Preprocessing)
 
-### 3.3 Text Orientation Handling
+**Notes & Implementation Details**
+| Vấn đề thực tế                         | Hướng xử lý                                                               |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| Box bị méo hoặc thứ tự điểm sai        | Cần chuẩn hóa thứ tự điểm về **top-left → clockwise** trước khi transform |
+| Box có kích thước quá nhỏ (e.g. < 5px) | Có thể bỏ qua do không đủ chi tiết cho rec                                |
+| Ảnh bị mất nét sau crop                | Thường do box co lại quá mức từ threshold, hoặc thiếu bước `unclip`       |
+| Hỗ trợ ảnh grayscale                   | Nên convert sang 3-channel (RGB) để thống nhất input                      |
+| Border bị cắt cụt                      | Phải đảm bảo tọa độ box đã clip về trong ảnh gốc (không vượt biên)        |
 
-* Không dùng classification model
-* Góc xoay được xử lý trong hàm `get_rotate_crop_image()`
-* Logic: Nếu box có height > 1.5 \* width → tự động xoay dọc
+**Tóm lại**
+Text Region Cropping là bước chuyển đổi hình học quan trọng giữa Detection và Recognition.
+Nếu box không được transform đúng:
+  - Text bị nghiêng hoặc méo → Recognition model hiểu sai
+  - Chữ bị cắt thiếu nét → rec ra chữ lỗi
+Việc đảm bảo mỗi patch được perspective rectified là tiền đề sống còn cho độ chính xác của toàn pipeline.
 
-## 4. Xử lý ảnh và cấu hình YAML
+### 2.3 Recognition Phase
+#### 2.3.1 Recognition Preprocessing
+**Mục tiêu** 
+Biến mỗi text patch (sau crop) thành tensor phù hợp với model recognition, giữ nguyên nội dung, tỷ lệ, và format.
 
-### 4.1 Detection Preprocessing
+**Pipeline tổng thể**
+[Text Patch Image]
+   ↓
+[Resize (Height = 48)]
+   ↓
+[Padding to max width (e.g. 320)]
+   ↓
+[Normalize pixel → [-1, 1]]
+   ↓
+[Reformat to Tensor: [1, 3, 48, W]]
 
-* Resize về \[3, 640, 640], scale theo tỉ lệ ảnh gốc
-* Normalize theo ImageNet:
+##### 1. Resize to Standard height
 
-  ```yaml
-  
-  scale: 1./255.
-  mean: [0.485, 0.456, 0.406]
-  std:  [0.229, 0.224, 0.225]
-  ```
-
-### 4.2 Recognition Preprocessing
-
-* Resize chiều cao = 48px, width biến đổi theo tỉ lệ ảnh (min = 320)
-* Normalize: (pixel / 255 - 0.5) / 0.5 → range \[-1, 1]
-* Padding bên phải nếu width chưa đủ
-
-### 4.3 Postprocessing Detection (DBPostProcess)
-
-```yaml
-thresh: 0.3
-box_thresh: 0.6
-max_candidates: 1000
-unclip_ratio: 1.5
-```
-
-### 4.4 Postprocessing Recognition (CTCLabelDecode)
-
-* Dùng CTC decoding để tạo chuỗi ký tự từ xác suất frame
-* Dictionary: `ppocrv5_dict.txt`
-* Hỗ trợ tiếng Trung, Nhật, Anh, ký tự đặc biệt
-
-## 5. Cấu hình huấn luyện và khả năng mở rộng
-
-### Detection Training (theo YAML)
-
-* Optimizer: Adam (lr=0.001)
-* Epochs: 500, Cosine LR
-* Loss: DBLoss (α=5, β=10)
-
-### Recognition Training
-
-* Optimizer: Adam (lr=0.0005)
-* Epochs: 75, Cosine LR
-* Loss: MultiLoss (CTCLoss + NRTRLoss)
-
-### Batch Size
-
-* Detection: 1 (eval)
-* Recognition: 128 (eval)
-
-## 6. Phân tích điểm mạnh / hạn chế
-
-### Điểm mạnh:
-
-* Lightweight, tốc độ nhanh, chính xác tốt
-* Không phụ thuộc Paddle khi convert sang ONNX
-* Có thể chạy hoàn toàn bằng `onnxruntime` + `numpy`
-
-### Hạn chế:
-
-* Không có stage classification → chưa xử lý tốt text nghiêng ngược
-* SVTR mặc định dùng dict gốc Trung Quốc – cần thay dict nếu muốn dùng tiếng Việt
-* Width recognition phải >=320px → ảnh nhỏ dễ bị pad trắng
-
-## 7. Kiến trúc thư mục gợi ý
-
-```
-project_root/
-├── models/
-│   ├── det_model.onnx
-│   └── rec_model.onnx
-├── dict/ppocrv5_dict.txt
-├── pipeline/
-│   ├── preprocess.py
-│   ├── detect.py
-│   ├── crop.py
-│   ├── recognize.py
-│   └── postprocess.py
-├── main.py
-└── README.md
-```
-
-## 8. Phụ lục
-
-### 8.1 Thư viện phụ thuộc
-
-```bash
-opencv-python
-numpy
-onnxruntime
-shapely
-pyclipper
-matplotlib (optional)
-Pillow (optional)
-```
-
-### 8.2 File cấu hình YAML chính
-
-* det/det\_pp-ocrv5.yml
-* rec/rec\_pp-ocrv5.yml
-
-### 8.3 Mô tả dictionary ký tự
-
-* `ppocrv5_dict.txt`: Gồm >7000 ký tự: chữ Trung, Nhật, Latin, số, ký hiệu, khoảng trắng
-
----
-
-**Người thực hiện:** \[Tên bạn]
-**Ngày hoàn tất:** \[DD/MM/YYYY]
-**Mục đích:** Lưu trữ tri thức nội bộ, phục vụ future dev/debug/integration
