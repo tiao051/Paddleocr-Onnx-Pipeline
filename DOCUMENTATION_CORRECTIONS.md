@@ -1,275 +1,342 @@
-# Documentation Corrections Based on Actual Implementation
+# PaddleOCRv5 ONNX Inference - R\&D Summary Document
 
-## 1. Model Specifications (Section 4) - CORRECTED WITH YAML CONFIGS
+## 1. Mục tiêu nghiên cứu
 
-### Detection Model (PP-OCRv5_mobile_det):
-- **Model Architecture**: DB (Differentiable Binarization) with PPLCNetV3 backbone (scale=0.75)
-- **Actual Input**: `x` (input node name)
-- **Actual Shape**: [1, 3, 640, 640] (from det_pp-ocrv5.yml: `d2s_train_image_shape: [3, 640, 640]`)
-- **Actual Output**: Probability map [1, 1, H, W] where H,W are scaled versions of 640x640
-- **Neck**: RSEFPN with 96 output channels and shortcut connections
-- **Head**: DBHead with k=50 and fix_nan=True
+Xây dựng lại pipeline PaddleOCRv5 inference hoàn toàn bằng ONNX, không phụ thuộc vào Paddle framework, để phục vụ nhận dạng chữ từ ảnh (image to text). Nghiên cứu mô hình detection-recognition của PaddleOCRv5, hiểu rõ kiến trúc, chuẩn hóa input/output, cấu hình YAML, và loại bỏ thành phần classifier trong quá trình tối ưu hóa cho inference.
 
-### Recognition Model (PP-OCRv5_mobile_rec):
-- **Model Architecture**: SVTR_LCNet with PPLCNetV3 backbone (scale=0.95)
-- **Actual Input Shape**: [1, 3, 48, 320] (from rec_pp-ocrv5.yml: `d2s_train_image_shape: [3, 48, 320]`)
-- **Dynamic Width**: Supports variable width based on max_wh_ratio, minimum 320px
-- **Head**: MultiHead with CTCHead + NRTRHead
-- **SVTR Neck**: dims=120, depth=2, hidden_dims=120, kernel_size=[1,3], use_guide=True
-- **Max Text Length**: 25 characters
-- **Normalization**: [-1, 1] range (not [0, 1])
+## 2. Tổng quan pipeline
 
-### Classification Model:
-- **Note**: Classification model is NOT actually used in this implementation
-- The pipeline goes: Detection → Recognition (2-stage, not 3-stage)
+Pipeline inference chia thành hai giai đoạn:
 
-## 2. Process Flow (Section 3) - Major Correction
-
-### Actual Pipeline:
 ```
-Input Image → Detection Preprocessing → Detection ONNX → Postprocessing → Crop Text Regions → Recognition Preprocessing → Recognition ONNX → CTC Decoding → Final Text
+Input Image
+  → Detection Preprocessing
+  → Detection ONNX (DB Algorithm)
+  → DB Postprocessing
+  → Crop Text Regions
+  → Recognition Preprocessing
+  → Recognition ONNX (SVTR_LCNet)
+  → CTC Decoding
+  → Final Text
 ```
 
-**Classification stage is NOT implemented** - this is a 2-stage pipeline, not 3-stage.
+> Ghi chú: Không có bước classification – text orientation được xử lý trong bước crop bằng logic hình học.
 
-## 3. Preprocessing Details (Section 3.1) - CORRECTED WITH YAML EVIDENCE
+## 2.1 Detection Phase
+Mục tiêu của bước này là xác định vùng có chứa chữ trong ảnh đầu vào, dưới dạng box 4 điểm.
+## 2.1.1 Detection Preprocessing
+Trước khi đưa ảnh vào model ONNX, ảnh cần được biến đổi về format và thống nhất scale để khớp với mô hình đã training.
+Các bước cụ thể: 
+1. Resize ảnh về kích thước cố định [640, 640]
 
-### Detection Preprocessing (Based on det_pp-ocrv5.yml):
-- **Target Size**: 640px (fixed from `d2s_train_image_shape: [3, 640, 640]`)
-- **Rounding**: Round to nearest 32-pixel multiple for optimal processing
-- **Normalization**: ImageNet normalization from YAML config:
+✅ What:
+Chuyển ảnh về kích thước cố định 640x640 pixel, bất kể input ban đầu là gì.
+
+❓ Why – Lý do sâu:
+
+PP-OCRv5_mobile_det sử dụng:
+Backbone: PPLCNetV3
+Detection Head: DB (Differentiable Binarization)
+Ref: https://github.com/PaddlePaddle/PaddleOCR/blob/main/configs/det/PP-OCRv5/PP-OCRv5_mobile_det.yml
+
+a. Kiến trúc PP-OCRv5_mobile_det yêu cầu ảnh đầu vào cố định [3, 640, 640]:
+
+Các layer như Conv2D, DepthwiseConv, BatchNorm có weight được training theo kích thước này, và ONNX export đã cố định input shape.
+    Khi export sang ONNX (hoặc static inference engine), toàn bộ kernel shape, stride, padding, input/output tensor shape được hard-code.
+    Nếu bạn đưa ảnh kích thước khác vào:
+    Layer Conv2D không matching shape → ONNX runtime báo lỗi.
+
+Hoặc model “chạy được” nhưng output feature map bị lệch tầng → DB Head decode sai vùng chữ.
+Nếu đưa input sai kích thước, model sẽ báo lỗi shape mismatch, hoặc tạo ra output DB map sai tỉ lệ với ảnh gốc.
+Ngoài ra, postprocess (decode box) phụ thuộc vào tỷ lệ giữa ảnh và DB map, nên nếu shape lệch sẽ gây lỗi hoặc kết quả sai hoàn toàn.
+
+📌 b. DB Head phụ thuộc vào tỷ lệ không gian giữa ảnh và output map
+DB head không trực tiếp predict bounding box, mà sinh ra các map nhị phân:
+    Binary map (text vs background)
+    Threshold map
+    Approximate binarized map
+Các map này có shape cố định, ví dụ [160 × 160] (do backbone stride = 4)
+Nếu ảnh input không đúng [640 × 640] thì:
+Mỗi pixel trên map không còn tương ứng chính xác với vùng ảnh gốc
+→ Decode box bị sai vị trí và scale
+🧠 Do đó, resize đúng shape là bắt buộc để đảm bảo DB map phản ánh chính xác không gian ảnh gốc.
+
+📌 c. Khác với Recognition, ở bước Detection không cần giữ nguyên aspect ratio khi resize ảnh
+
+Việc resize trực tiếp thay vì padding giữ tỉ lệ là một lựa chọn thiết kế trong PaddleOCR vì:
+🔄 Detection hoạt động ở cấp độ toàn ảnh (global layout), chứ không cần độ chính xác pixel-level như recognition. Khi resize méo, các đoạn văn bản vẫn giữ được tương quan không gian đủ để model nhận biết vùng có chữ.
+🧠 Kiến trúc DB head không phụ thuộc tuyệt đối vào aspect ratio. Nó học dựa trên hình dạng vùng liên kết (connected region) hơn là chi tiết kích thước chính xác của từng ký tự.
+⚡ Padding giữ tỉ lệ tuy giúp tránh méo hình, nhưng làm chậm inference:
+      Gây thêm thao tác padding/tracking padding size.
+      Cần xử lý ngược padding sau khi decode box.
+      Phức tạp hơn nếu chạy batch-size >1 với nhiều tỉ lệ ảnh khác nhau.
+✅ PaddleOCR chấp nhận trade-off: một mức méo nhẹ vẫn đảm bảo detect đủ tốt với đa số văn bản thật, trong khi giúp tăng tốc đáng kể cho inference.
+
+2. Convert sang float32 (nếu ảnh là uint8)
+
+✅ What:
+Chuyển kiểu dữ liệu từ uint8 (ảnh đầu vào từ OpenCV) sang float32 — định dạng mà mô hình yêu cầu.
+
+❓ Why – Lý do sâu:
+
+a. ONNX Runtime chỉ chấp nhận input kiểu float32
+
+Mô hình được huấn luyện và export với các tensor float32.
+Nếu đưa vào uint8, ONNX Runtime sẽ:
+    Báo lỗi không khớp kiểu
+    Hoặc cast ngầm → dễ gây bug hoặc cho kết quả sai
+
+b. Ép kiểu float32 là tiền đề bắt buộc trước khi normalize
+
+Việc normalize sau đó (img / 255.0, trừ mean, chia std) yêu cầu input là float32.
+Nếu thực hiện trên uint8:
+    Kết quả phép chia có thể trả về float64 (gây lỗi khi đưa vào model)
+    Hoặc chia sai do phép toán nguyên → ra toàn số 0
+
+3. Chuẩn hóa bằng ImageNet mean/std
+
+mean = [0.485, 0.456, 0.406]  
+std  = [0.229, 0.224, 0.225]
+
+Ref for mean and std: https://github.com/PaddlePaddle/PaddleOCR/blob/main/configs/det/PP-OCRv5/PP-OCRv5_mobile_det.yml
+
+2 bước chuẩn hóa ảnh đầu vào:
+Scale pixel từ [0, 255] → [0.0, 1.0]
+Ref: https://pytorch.org/vision/stable/transforms.html#torchvision.transforms.Normalize
+Normalize ảnh bằng cách trừ mean và chia std của ImageNet, nhằm đưa pixel đầu vào về phân phối có mean ≈ 0 và std ≈ 1 trên từng channel, đúng như mô hình đã được pretrain.
+
+❓ Why – Lý do sâu:
+
+a. Backbone (PPLCNetV3) được pretrain trên ImageNet:
+Các trọng số layer (conv, bn, relu) trong PPLCNetV3 được huấn luyện với input có mean/std như trên.
+Nếu không chuẩn hóa đúng, input sẽ có phân phối khác →
+    Feature map bị lệch toàn diện
+    Các filter đã học từ dữ liệu gốc (ImageNet) không còn khớp
+→ Giống như đưa ảnh “nhiễu sáng” hoặc “ngược màu” vào model → mô hình phản ứng sai hoặc cho kết quả rác.
+
+b. Normalize giúp loại bỏ nhiễu ánh sáng và độ tương phản
+Ảnh gốc có thể bị tối/sáng, nhiễu, độ tương phản cao thấp không ổn định
+Việc normalize giúp:
+Mỗi pixel mang thông tin tương đối, không tuyệt đối
+Mô hình tập trung vào biên, cạnh, hình khối (shape) — thứ mà DB head cần để phân biệt vùng có chữ hay không
+
+c. Tránh sai lệch số học và tăng ổn định khi inference
+
+Giá trị pixel nhỏ (≈ ±1) sau normalize giúp tránh:
+Overflow trong tính toán float
+Gradient explode/vanish (nếu dùng backward debug)
+Sai lệch hậu xử lý box nếu scale ảnh bị lệch
+
+4. Chuyển ảnh từ [H, W, C] → [C, H, W]
+
+✅ What:
+Đổi thứ tự chiều dữ liệu ảnh từ format mặc định của OpenCV ([H, W, C]) sang format chuẩn tensor [C, H, W] mà model yêu cầu.
+
+❓ Why – Lý do sâu:
+
+a. Hầu hết framework deep learning (Paddle, PyTorch, ONNX) đều expect input tensor ở dạng:
+
+[N, C, H, W]
+(với N: batch size, C: số channel, H, W: chiều cao & chiều rộng)
+
+b. Vì sao Conv2D cần channel C đứng đầu?
+Các lớp convolution (Conv2D) hoạt động theo cấu trúc:
+For each channel c:
+    Output += Input[c] * Kernel[c]
+Việc đưa channel lên đầu giúp framework:
+    Truy cập kênh hiệu quả hơn trong memory (data locality tốt hơn)
+    Dễ dàng chia tách per-channel filter khi optimize
+    Hỗ trợ batch operation qua chiều N (batch) phía trước
+
+c. Nếu giữ nguyên [H, W, C] → ONNX sẽ lỗi ngay
+Conv2D layer đầu tiên sẽ expect input shape [1, 3, 640, 640]
+Nếu bạn đưa [1, 640, 640, 3] → ONNX Runtime báo lỗi shape mismatch
+
+d. Ngoài ra, một số backend inference không tự báo lỗi rõ
+Với TensorRT, TVM hoặc custom engine: nếu không reshape đúng [C, H, W], bạn có thể bị:
+    Silent failure: ảnh bị swap màu (RGB ↔ BGR)
+    Output rác nhưng không lỗi
+    Debug khó vì không biết do format hay model
+
+5. Thêm batch dimension
+
+✅ What:
+Thêm một chiều ở đầu tensor để chuyển ảnh từ [C, H, W] → [1, C, H, W] (batch size = 1).
+
+❓ Why – Lý do sâu:
+
+a. ONNX model yêu cầu input có batch dimension:
+Các mô hình ONNX, bao gồm PP-OCRv5_mobile_det, luôn khai báo input với shape [N, C, H, W]
+Nếu bạn đưa ảnh thiếu batch dimension ([3, 640, 640]), ONNX Runtime sẽ:
+    Báo lỗi Invalid input shape
+    Hoặc ép reshape ngầm → gây ra bug ngầm, khó debug
+
+b. Chuẩn bị cho batch inference:
+Việc giữ cấu trúc batch-ready cho phép dễ dàng mở rộng về sau, chạy nhiều ảnh một lúc mà không cần refactor pipeline.
+
+Input shape chính xác yêu cầu:
+
+[1, 3, 640, 640]
+    1 → batch size
+    3 → RGB
+    640 × 640 → spatial dimension
+
+Nếu sai bất kỳ chiều nào:
+Thiếu batch	-> NNX Runtime báo lỗi Invalid shape
+Channel ≠ 3	-> Conv layer không khớp weight → lỗi hoặc output rác
+Size ≠ 640x640 -> Output feature map sai → DB map sai → box sai
+
+📌 Trong PaddleOCR, batch dimension được thêm tự động ở tầng `loader:`.  
+Tuy nhiên, khi viết pipeline inference ONNX riêng, bạn **phải thêm thủ công** batch `[1, C, H, W]`, nếu không sẽ gặp lỗi shape.
+
+## 3. Thành phần chi tiết
+
+### 3.1 Detection Model (PP-OCRv5\_mobile\_det)
+
+* **Kiến trúc chính**: DB (Differentiable Binarization)
+* **Backbone**: PPLCNetV3, scale=0.75
+* **Neck**: RSEFPN, 96 kênh, shortcut=True
+* **Head**: DBHead, k=50, fix\_nan=True
+* **Input**: \[1, 3, 640, 640]
+* **Output**: Probability map \[1, 1, H, W]
+
+#### Vì sao chọn DB:
+
+* Phù hợp với bài toán segment vùng text (thay vì detect box cứng)
+* Kết quả ra dạng mask → dễ postprocess thành box chính xác
+
+### 3.2 Recognition Model (PP-OCRv5\_mobile\_rec)
+
+* **Kiến trúc chính**: SVTR\_LCNet
+* **Backbone**: PPLCNetV3, scale=0.95
+* **Head**: MultiHead (CTCHead + NRTRHead)
+* **SVTR Neck**: dims=120, depth=2, hidden\_dims=120
+* **Input**: \[1, 3, 48, variable-width]
+* **Output**: Sequence \[1, T, vocab\_size]
+* **Giới hạn độ dài**: max\_text\_length = 25
+
+#### Vì sao dùng SVTR\_LCNet:
+
+* Kết hợp CNN (LCNet) với self-attention (SVTR) → nhẹ, chính xác
+* Phù hợp thiết bị mobile, inference nhanh
+
+### 3.3 Text Orientation Handling
+
+* Không dùng classification model
+* Góc xoay được xử lý trong hàm `get_rotate_crop_image()`
+* Logic: Nếu box có height > 1.5 \* width → tự động xoay dọc
+
+## 4. Xử lý ảnh và cấu hình YAML
+
+### 4.1 Detection Preprocessing
+
+* Resize về \[3, 640, 640], scale theo tỉ lệ ảnh gốc
+* Normalize theo ImageNet:
+
   ```yaml
-  NormalizeImage:
-    scale: 1./255.
-    mean: [0.485, 0.456, 0.406]
-    std: [0.229, 0.224, 0.225]
-    order: hwc
+  
+  scale: 1./255.
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
   ```
-- **Transform Pipeline**: DecodeImage → DetLabelEncode → DetResizeForTest → NormalizeImage → ToCHWImage
 
-### Recognition Preprocessing (Based on rec_pp-ocrv5.yml):
-- **Height**: Fixed 48px (from `d2s_train_image_shape: [3, 48, 320]`)
-- **Width**: Dynamic based on aspect ratio, minimum 320px
-- **Max Text Length**: 25 characters (from `max_text_length: 25`)
-- **Character Dictionary**: `./ppocr/utils/dict/ppocrv5_dict.txt`
-- **Space Character**: Enabled (`use_space_char: true`)
-- **Normalization**: (pixel/255 - 0.5) / 0.5 → [-1, 1] range
-- **Padding**: Zero-padding applied to right side
-- **Transform Pipeline**: DecodeImage → MultiLabelEncode → RecResizeImg → KeepKeys
+### 4.2 Recognition Preprocessing
 
-## 4. Postprocessing Parameters (Section 4.1) - EXACT YAML VALUES
+* Resize chiều cao = 48px, width biến đổi theo tỉ lệ ảnh (min = 320)
+* Normalize: (pixel / 255 - 0.5) / 0.5 → range \[-1, 1]
+* Padding bên phải nếu width chưa đủ
 
-### DB Postprocessing (from det_pp-ocrv5.yml):
+### 4.3 Postprocessing Detection (DBPostProcess)
+
 ```yaml
-PostProcess:
-  name: DBPostProcess
-  thresh: 0.3          # Binary threshold for segmentation
-  box_thresh: 0.6      # Confidence threshold for text boxes
-  max_candidates: 1000 # Maximum number of contours to process
-  unclip_ratio: 1.5    # Box expansion ratio (NOT 2.0 as sometimes documented)
+thresh: 0.3
+box_thresh: 0.6
+max_candidates: 1000
+unclip_ratio: 1.5
 ```
 
-### Recognition Postprocessing (from rec_pp-ocrv5.yml):
-```yaml
-PostProcess:  
-  name: CTCLabelDecode  # CTC decoding for text recognition
+### 4.4 Postprocessing Recognition (CTCLabelDecode)
+
+* Dùng CTC decoding để tạo chuỗi ký tự từ xác suất frame
+* Dictionary: `ppocrv5_dict.txt`
+* Hỗ trợ tiếng Trung, Nhật, Anh, ký tự đặc biệt
+
+## 5. Cấu hình huấn luyện và khả năng mở rộng
+
+### Detection Training (theo YAML)
+
+* Optimizer: Adam (lr=0.001)
+* Epochs: 500, Cosine LR
+* Loss: DBLoss (α=5, β=10)
+
+### Recognition Training
+
+* Optimizer: Adam (lr=0.0005)
+* Epochs: 75, Cosine LR
+* Loss: MultiLoss (CTCLoss + NRTRLoss)
+
+### Batch Size
+
+* Detection: 1 (eval)
+* Recognition: 128 (eval)
+
+## 6. Phân tích điểm mạnh / hạn chế
+
+### Điểm mạnh:
+
+* Lightweight, tốc độ nhanh, chính xác tốt
+* Không phụ thuộc Paddle khi convert sang ONNX
+* Có thể chạy hoàn toàn bằng `onnxruntime` + `numpy`
+
+### Hạn chế:
+
+* Không có stage classification → chưa xử lý tốt text nghiêng ngược
+* SVTR mặc định dùng dict gốc Trung Quốc – cần thay dict nếu muốn dùng tiếng Việt
+* Width recognition phải >=320px → ảnh nhỏ dễ bị pad trắng
+
+## 7. Kiến trúc thư mục gợi ý
+
+```
+project_root/
+├── models/
+│   ├── det_model.onnx
+│   └── rec_model.onnx
+├── dict/ppocrv5_dict.txt
+├── pipeline/
+│   ├── preprocess.py
+│   ├── detect.py
+│   ├── crop.py
+│   ├── recognize.py
+│   └── postprocess.py
+├── main.py
+└── README.md
 ```
 
-### Loss Functions (from rec_pp-ocrv5.yml):
-```yaml
-Loss:
-  name: MultiLoss
-  loss_config_list:
-    - CTCLoss:          # For CTC head
-    - NRTRLoss:         # For NRTR head
+## 8. Phụ lục
+
+### 8.1 Thư viện phụ thuộc
+
+```bash
+opencv-python
+numpy
+onnxruntime
+shapely
+pyclipper
+matplotlib (optional)
+Pillow (optional)
 ```
 
-## 5. Dependencies (Section 5.1) - COMPLETE LIST WITH YAML REQUIREMENTS
+### 8.2 File cấu hình YAML chính
 
-### Core Dependencies (Required):
-```python
-- cv2 (OpenCV)           # Image processing
-- numpy                  # Numerical computations  
-- onnxruntime           # ONNX model inference
-- shapely               # Geometric operations for DB postprocessing
-- pyclipper             # Polygon clipping for text box expansion
-```
+* det/det\_pp-ocrv5.yml
+* rec/rec\_pp-ocrv5.yml
 
-### Optional Dependencies:
-```python
-- matplotlib            # For visualization and debugging
-- Pillow (PIL)          # Additional image format support
-```
+### 8.3 Mô tả dictionary ký tự
 
-### Training Dependencies (from YAML configs):
-```python
-- paddle                # For model training (not needed for inference)
-- visualdl              # For training visualization (use_visualdl: false)
-```
+* `ppocrv5_dict.txt`: Gồm >7000 ký tự: chữ Trung, Nhật, Latin, số, ký hiệu, khoảng trắng
 
-### Hardware Requirements (from YAML):
-- **GPU Support**: Available (`use_gpu: true` in both configs)
-- **CPU Fallback**: Supported for inference-only deployment
-- **Distributed Training**: Supported (`distributed: true` in both configs)
+---
 
-## 6. Performance Characteristics (Section 6.1) - BASED ON YAML CONFIGS
-
-### Model Architecture Performance:
-
-#### Detection Model (PP-OCRv5_mobile_det):
-- **Backbone**: PPLCNetV3 scale=0.75 (mobile-optimized)
-- **Training**: 500 epochs with Cosine learning rate schedule
-- **Optimizer**: Adam (β1=0.9, β2=0.999, lr=0.001)
-- **Loss**: DBLoss with DiceLoss (α=5, β=10, ohem_ratio=3)
-- **Input Constraints**: Images resized to fit in 640x640 (maintaining aspect ratio)
-
-#### Recognition Model (PP-OCRv5_mobile_rec):
-- **Backbone**: PPLCNetV3 scale=0.95 (slightly larger for accuracy)
-- **Training**: 75 epochs with Cosine learning rate schedule  
-- **Optimizer**: Adam (β1=0.9, β2=0.999, lr=0.0005)
-- **Text Length**: Maximum 25 characters per text region
-- **Input Constraints**: Text regions normalized to height=48px, variable width (min 320px)
-
-### Memory and Processing:
-- **Memory**: ~500MB for both models combined
-- **Batch Processing**: 
-  - Detection: batch_size_per_card=1 (for evaluation)
-  - Recognition: batch_size_per_card=128 (for evaluation)
-
-### Character Set and Languages:
-- **Dictionary Path**: `./ppocr/utils/dict/ppocrv5_dict.txt` 
-- **Character Set**: PP-OCRv5 standard charset with space character support
-- **Languages**: Multi-language support (primarily optimized for Chinese, English, Japanese)
-
-## 7. Configuration Files (Section 8.1) - DETAILED YAML ANALYSIS
-
-### Actual Config Files and Their Purposes:
-
-#### Detection Config (`det/det_pp-ocrv5.yml`):
-```yaml
-Key Settings:
-- model_name: PP-OCRv5_mobile_det
-- algorithm: DB (Differentiable Binarization)
-- d2s_train_image_shape: [3, 640, 640]
-- Architecture:
-  - Backbone: PPLCNetV3 (scale=0.75, det=True)
-  - Neck: RSEFPN (out_channels=96, shortcut=True)  
-  - Head: DBHead (k=50, fix_nan=True)
-- PostProcess: DBPostProcess (thresh=0.3, box_thresh=0.6, unclip_ratio=1.5)
-```
-
-#### Recognition Config (`rec/rec_pp-ocrv5.yml`):
-```yaml
-Key Settings:
-- model_name: PP-OCRv5_mobile_rec
-- algorithm: SVTR_LCNet
-- d2s_train_image_shape: [3, 48, 320]
-- max_text_length: 25
-- character_dict_path: ./ppocr/utils/dict/ppocrv5_dict.txt
-- use_space_char: true
-- Architecture:
-  - Backbone: PPLCNetV3 (scale=0.95)
-  - Head: MultiHead (CTCHead + NRTRHead)
-- PostProcess: CTCLabelDecode
-```
-
-#### Additional Files:
-- `utils/char_dic.txt` - Character dictionary for recognition
-- Model files: `models/det_model.onnx`, `models/rec_model.onnx`
-
-## 8. API Design (Section 9.1) - Simplify
-
-### Actual Usage:
-```python
-# Complete pipeline
-from main import main
-result = main()  # Returns formatted OCR results
-
-# Individual components  
-from det.rewrite_myself import main_det_run
-from rec.rec_inference_onnx import RecognitionONNX
-
-# Detection only
-img, boxes = main_det_run()
-
-# Recognition only  
-recognizer = RecognitionONNX("models/rec_model.onnx")
-text = recognizer.recognize(crop_image)
-```
-
-## 9. Architecture Improvements Needed - CRITICAL CORRECTIONS
-
-### Missing Classification Stage (MAJOR ERROR IN DOCUMENTATION):
-The original documentation incorrectly describes a 3-stage pipeline:
-```
-❌ WRONG: Detection → Classification → Recognition (3-stage)
-✅ ACTUAL: Detection → Recognition (2-stage)
-```
-
-**Evidence from YAML configs:**
-- Only 2 model configs exist: `det_pp-ocrv5.yml` and `rec_pp-ocrv5.yml`
-- No classification model configuration anywhere
-- No cls_model.onnx file in the models directory
-
-### Actual Text Orientation Handling:
-Text orientation is handled in the cropping stage via `get_rotate_crop_image()` which auto-rotates if height > 1.5 * width, NOT through a separate classification model.
-
-### Model Architecture Details (from YAML):
-
-#### Detection (DB Algorithm):
-- **Purpose**: Text region detection and localization
-- **Architecture**: PPLCNetV3 + RSEFPN + DBHead
-- **Output**: Probability maps for text regions
-
-#### Recognition (SVTR_LCNet Algorithm): 
-- **Purpose**: Character sequence recognition from cropped text regions
-- **Architecture**: PPLCNetV3 + MultiHead (CTC + NRTR)
-- **Output**: Character sequences with confidence scores
-
-## 10. Model Files Required
-
-### Actual Model Files:
-- `models/det_model.onnx` - Detection model
-- `models/rec_model.onnx` - Recognition model
-- No classification model required
-
-## Recommendations - COMPREHENSIVE DOCUMENTATION REWRITE NEEDED:
-
-### 1. **CRITICAL: Remove all references to classification model/stage**
-   - Update architecture diagrams to show 2-stage pipeline only
-   - Remove any mention of text orientation classification model
-   - Correct all flow diagrams and API documentation
-
-### 2. **Update model specifications with YAML-verified parameters**
-   - Detection: [1, 3, 640, 640] with PPLCNetV3 backbone (scale=0.75)
-   - Recognition: [1, 3, 48, 320] with PPLCNetV3 backbone (scale=0.95)
-   - Include exact architecture details from YAML configs
-
-### 3. **Correct preprocessing normalization ranges and methods**
-   - Detection: ImageNet normalization (scale=1./255, mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-   - Recognition: [-1, 1] range normalization ((pixel/255 - 0.5) / 0.5)
-
-### 4. **Add complete dependency list with geometric processing libraries**
-   - Include shapely and pyclipper (critical for DB postprocessing)
-   - Specify optional vs required dependencies
-
-### 5. **Update pipeline flow diagram to reflect actual implementation**
-   ```
-   Input Image → Detection Preprocessing → Detection ONNX → DB Postprocessing → 
-   Crop Text Regions → Recognition Preprocessing → Recognition ONNX → CTC Decoding → Final Text
-   ```
-
-### 6. **Include exact configuration parameters from YAML files**
-   - DB postprocessing: thresh=0.3, box_thresh=0.6, unclip_ratio=1.5
-   - Recognition: max_text_length=25, use_space_char=true
-   - Architecture details for both models
-
-### 7. **Add validation section with actual model file requirements**
-   - Only 2 ONNX files needed: det_model.onnx + rec_model.onnx
-   - Character dictionary: ppocrv5_dict.txt
-   - No classification model required
-
-### 8. **Performance benchmarks based on YAML training configurations**
-   - Include mobile optimization details (PPLCNetV3 scale factors)
-   - Batch size recommendations from evaluation configs
-   - Hardware requirements (GPU/CPU support)
+**Người thực hiện:** \[Tên bạn]
+**Ngày hoàn tất:** \[DD/MM/YYYY]
+**Mục đích:** Lưu trữ tri thức nội bộ, phục vụ future dev/debug/integration
