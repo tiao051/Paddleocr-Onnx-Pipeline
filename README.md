@@ -16,7 +16,7 @@ Input Image
   → Crop Text Regions
   → Recognition Preprocessing
   → Recognition ONNX (SVTR_LCNet)
-  → CTC Decoding
+  → Recognition Postprocessing (CTCLabelDecode)
   → Final Text
 ```
 
@@ -851,3 +851,336 @@ Không phải vì “model yêu cầu” một cách máy móc, mà vì bản th
 |--------------------------|---------------------------|
 | Text patch `[h, w, 3]`   | `[48, w', 3]`             |
 | Condition `w'` có thể thay đổi theo tỷ lệ khung hình |
+
+##### 2. Padding to Max Width
+**Mục tiêu**
+Chuẩn hóa chiều rộng ảnh sau khi resize về một kích thước cố định (`W_max = 320`) để đảm bảo toàn bộ batch có shape đồng nhất `[B, 3, 48, 320]` trong quá trình inference.  
+Không làm biến dạng text, không thay đổi thông tin hình học, không ảnh hưởng đến feature extractor.
+
+**Bản chất**
+- Padding là quá trình **nối thêm pixel (thường màu đen)** ở phía phải ảnh để đảm bảo ảnh có chiều rộng đủ dài.
+- Không tác động đến nội dung hình ảnh gốc, chỉ mở rộng không gian.
+
+**Tại sao phải pad?**
+1. Kích thước ảnh sau resize là linh hoạt
+  - Sau bước resize (H = 48, giữ aspect ratio), mỗi text patch có width khác nhau → ảnh có shape `[48, w']` với `w'` biến đổi theo input.
+  - Không thể stack thành batch tensor `[B, C, 48, W]` nếu `W` không đồng nhất.
+
+2. Padding giúp batch inference nhanh hơn
+  - Khi batch inference: cần tensor đồng kích thước
+  - Padding (bằng 0) vẫn giữ được **nội dung thật ở bên trái**, phần pad không ảnh hưởng đến logic
+  - Đặc biệt hữu dụng với transformer (SVTR), nơi attention có thể masking vùng pad
+
+3. Không được resize cứng để ép chiều rộng
+- Nếu resize ảnh về `[48, 320]` → sẽ co dãn text → **méo chữ, mất tỷ lệ**, ảnh hưởng nghiêm trọng đến recognition
+- Padding giúp **giữ nguyên tỷ lệ gốc** mà vẫn đáp ứng yêu cầu batch
+
+###### **Kỹ thuật padding**
+
+```python
+def pad_image(img, target_width=320):
+    h, w, c = img.shape
+    if w >= target_width:
+        return img[:, :target_width, :]  # crop nếu dài quá
+    else:
+        padded = np.zeros((h, target_width, c), dtype=img.dtype)
+        padded[:, :w, :] = img
+        return padded
+```
+Giải thích logic:
+- Nếu w' < 320: gán ảnh vào vùng trái → phần dư bên phải để 0 (màu đen)
+- Nếu w' > 320: crop cứng bên phải (chấp nhận mất ký tự cuối nếu quá dài)
+- Kết quả ảnh sau padding có shape [48, 320, 3]
+
+**Tại sao `W_max = 320`?**
+Dựa trên empirical statistics:
+- Thống kê từ nhiều dataset (ICDAR, SVT, MJSynth, ReCTS, etc.) cho thấy phần lớn text patch < 300 pixels (sau resize)
+- 320 bao phủ ~98% các text-line phổ biến
+Trade-off:
+| Tham số         | Giá trị thấp         | Giá trị cao           |
+| --------------- | -------------------- | --------------------- |
+| Width (W_max)   | RAM thấp, nhưng crop | Bao phủ rộng, tốn RAM |
+| Inference speed | Nhanh hơn            | Chậm hơn do padding   |
+| Risk            | Dễ mất chữ ở cuối    | Padding thừa nhiều    |
+
+→ 320 là điểm cân bằng: đủ dài cho phần lớn text, không tốn RAM như 512
+
+**Impact to downstream?**
+- Transformer-based recognizers (SVTR) có cơ chế attention mask → không bị ảnh hưởng nếu pad đúng
+- CTC decoder cần batch tensor đồng nhất để decode theo beam search
+- Padding sai (nhét phía trái, hoặc dùng giá trị ≠ 0) có thể làm lệch align
+
+**Production Considerations**
+| Vấn đề              | Giải pháp                                   |
+| ------------------- | ------------------------------------------- |
+| Text dài hơn 320px  | Có thể crop hoặc bỏ qua với warning log     |
+| Batch size lớn      | Tính `W_max` động theo batch (`max(w')`)    |
+| Memory optimization | Group text patch theo width trước khi batch |
+
+**Tóm tắt I/O**
+| Input shape         | Output shape   | Ghi chú             |
+| ------------------- | -------------- | ------------------- |
+| `[48, w' ≤ 320, 3]` | `[48, 320, 3]` | Pad bên phải bằng 0 |
+| `[48, w' > 320, 3]` | `[48, 320, 3]` | Crop bên phải       |
+
+##### 3. Normalize Pixel to [-1, 1] Range
+**Mục tiêu**
+Chuẩn hóa giá trị pixel ảnh từ dải [0, 255] về khoảng [-1, 1], nhằm:
+- Phù hợp với thống kê phân phối mà mô hình đã được huấn luyện
+- Giúp mô hình học ổn định hơn do các feature đầu vào đồng đều, không lệch tỉ lệ
+
+**Bản chất**
+Normalization ở đây là quá trình **chuyển đổi giá trị pixel** từ hệ 8-bit RGB (0–255) sang hệ thống chuẩn hóa, bằng cách áp dụng công thức:
+  ```python
+    img = img / 255.0     # Scale về [0, 1]
+    img = (img - 0.5) / 0.5  # Scale tiếp về [-1, 1]
+  ```
+
+**Tại sao phải normalize về [-1, 1]?**
+1. CNN không học tốt với input raw (0–255)
+- Dải giá trị pixel [0–255] lệch rất xa khỏi origin (mean = 127.5), gây lệch mạnh về distribution
+- Các filter đầu tiên trong CNN thường có kernel nhỏ (3×3), hoạt động như edge detector hoặc blob detector → chúng chỉ hoạt động hiệu quả khi đầu vào có scale hợp lý (mean ≈ 0)
+- Nếu không normalize:
+  - Gradient ở các lớp đầu sẽ lớn hoặc nhỏ bất thường → **vanishing hoặc exploding gradient**
+  - Kết quả là mô hình học chậm, hoặc inference ra sai lệch
+
+2. BatchNorm & Activation giả định input có mean ≈ 0
+- Các layer như **BatchNorm, LayerNorm** đều hoạt động tốt nhất khi dữ liệu có **mean ≈ 0, std ≈ 1**
+- Nếu input có mean lệch xa (e.g. mean = 127.5) → BatchNorm phải “vật lộn” để điều chỉnh lại → giảm hiệu quả chuẩn hóa
+- Ngoài ra, các activation như **ReLU** sẽ bị “bias” theo hướng dương → mất đối xứng → mô hình học chậm và dễ sai lệch về prediction
+
+3. Normalize tạo sự đồng đều trên toàn bộ tập dữ liệu
+- Trong OCR thực tế, ảnh input có thể đến từ nhiều nguồn: scan, camera, ảnh xám, ảnh màu...
+- Normalize về [-1, 1] giúp đảm bảo mọi input có chung chuẩn thống kê → mô hình **không bị sốc domain**
+- Đây là bước **data scaling cố định** (min-max normalization về [-1, 1]), không phải chuẩn hóa theo mean/std như các model ImageNet-style.
+
+4. Training model đã giả định input nằm trong [-1, 1]
+Toàn bộ quá trình training của các backbone như CRNN, SVTR trong PaddleOCR đã sử dụng input normalized về [-1, 1]
+- Nếu inference dùng input raw [0–255], tức là đưa vào mô hình một distribution mà nó **chưa bao giờ thấy**
+→ Dẫn đến output không đáng tin, giảm mạnh accuracy
+
+**Tại sao không dùng normalization theo mean/std?**
+Trong nhiều pipeline thị giác (e.g. ResNet), ta hay thấy:
+  img = (img - mean) / std
+Tuy nhiên, ở phần recognition preprocessing PaddleOCR intentionally KHÔNG dùng mean/std mà dùng min-max cố định về [-1, 1].
+| Lý do                                           | Giải thích                                                                               |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1. OCR patch không có phân phối tự nhiên        | Text patch thường chỉ gồm nét chữ & nền → không đủ độ phức tạp để tính mean/std đại diện |
+| 2. Mean/std làm giảm tương phản nét chữ         | Flatten pixel theo mean làm nhạt nét chữ, khó cho layer đầu học đặc trưng cạnh           |
+| 3. Không dùng backbone pretrain từ ImageNet     | CRNN, SVTR, Rosetta được train từ đầu → không cần giữ mean/std lịch sử                   |
+| 4. Tăng khả năng generalize domain              | Min-max đơn giản hơn, ổn định hơn giữa các kiểu ảnh (màu, xám, noise)                    |
+| 5. Nhẹ hơn, nhanh hơn                           | Không cần load/tính mean/std → tăng tốc inference                                        |
+
+###### Kết luận
+Normalize về [-1, 1] không phải là “hack để mô hình chạy được”, mà là bước bắt buộc để đảm bảo toàn bộ pipeline hoạt động đúng theo logic mà nó đã được thiết kế và huấn luyện.
+
+**Ảnh hưởng đến các mô hình downstream**
+| Module       | Expectation on Input     | Ghi chú                          |
+| ------------ | ------------------------ | -------------------------------- |
+| CNN Backbone | Input ∈ [-1, 1]          | Trained với normalize này        |
+| BatchNorm    | Giả định input mean = 0  | Normalize giúp tránh scale lệch  |
+| SVTR / CRNN  | Feature đầu vào đồng đều | Nếu không normalize → dễ sai rec |
+
+**Sai sót phổ biến**
+| Lỗi                                     | Hậu quả                               |
+| --------------------------------------- | ------------------------------------- |
+| Quên normalize                          | Recognition score giảm mạnh           |
+| Normalize sai về [0,1] thay vì [-1,1]   | Kết quả rec méo mó, nhầm chữ          |
+| Normalize sau khi transpose             | Không ảnh hưởng, nhưng không hiệu quả |
+
+**Tóm tắt I/O**
+| Input dtype   | Output dtype | Input range | Output range | Shape          |
+| ------------- | ------------ | ----------- | ------------ | -------------- |
+| `uint8`       | `float32`    |  [0, 255]   |  [-1.0, 1.0] | `[48, 320, 3]` |
+| Sau normalize |              |             |              | `[3, 48, 320]` |
+
+**Kết luận**
+- Normalize về [-1, 1] là bước bắt buộc nếu dùng model pretrained từ PaddleOCR
+- Không thay đổi nội dung ảnh, chỉ giúp feature extractor hoạt động hiệu quả
+- Normalize đúng = mô hình hoạt động đúng = accuracy cao hơn
+
+#### 2.3.2 Recognition Inference
+**Mục tiêu**
+Chuyển đổi mỗi ảnh text patch `[3, 48, W]` (sau preprocessing) thành tensor xác suất (`logits`) qua mô hình SVTR_LCNet (đã được convert sang ONNX).  
+Toàn bộ quá trình **chỉ thực hiện forward**, không bao gồm training hay decode.
+
+**Pipeline nội bộ**
+[Text Patch Tensor: 1×3×48×W] 
+      ↓
+[ONNX Model: SVTR_LCNet (PPLCNetV3 + SVTR + CTCHead)]
+      ↓
+[Logit Tensor: 1 × T × V]
+
+Trong đó:
+- T: số bước thời gian (timestep) ≈ chiều rộng sau backbone
+- V: kích thước vocab (số lượng ký tự trong dict + 1 ký hiệu blank CTC)
+
+**Kiến trúc nội bộ mô hình**
+```yaml
+Architecture:
+  algorithm: SVTR_LCNet
+  Backbone:
+    name: PPLCNetV3
+    scale: 0.95
+  Head:
+    name: MultiHead
+    head_list:
+      - CTCHead:
+          Neck:
+            name: svtr
+            dims: 120
+            depth: 2
+            hidden_dims: 120
+            kernel_size: [1, 3]
+            use_guide: True
+          Head:
+            fc_decay: 0.00001
+      - NRTRHead:
+          nrtr_dim: 384
+          max_text_length: *max_text_length
+```
+
+**Các thành phần chi tiết**
+##### 1. Backbone: PPLCNetV3
+Nhiệm vụ: Trích xuất đặc trưng không gian từ ảnh văn bản [3×48×W].
+- Là CNN backbone nhẹ, optimized cho mobile, tương tự EfficientNet.
+- Giảm dần chiều cao từ 48 → 3 thông qua 4 tầng downsampling (stride = 2).
+- Output tensor: [B, C, 3, W'] với C = 120, W' phụ thuộc vào W đầu vào.
+→ Tensor này được xem như sequence gồm W' vectors, mỗi vector đại diện cho 1 "rãnh dọc" trên ảnh văn bản.
+
+→ Input:   [1, 3, 48, W]
+→ Output:  [1, 120, 3, W']
+
+##### 2. Neck: SVTR
+Mục tiêu: Model hóa quan hệ giữa các vector theo chiều ngang (width), tức là giữa các ký tự.
+- SVTR = Semantic Visual Text Recognition Module
+- Thay vì dùng LSTM (như CRNN), SVTR dùng:
+  - Local Attention (Conv → LayerNorm → GELU)
+  - Global Self-Attention (Multi-head Attention)
+  - Feed Forward + Residual
+
+→ Input: [1, C=120, 3, W'] → reshape về [B, W', C×3] → xử lý như sequence
+→ Output: [1, W', D] với D = 120
+- SVTR xử lý như một chuỗi vector → tạo ngữ cảnh giữa các ký tự gần nhau và xa nhau.
+
+##### 3. Head: CTCHead (được sử dụng ở inference)
+**Lưu ý**: Dù kiến trúc MultiHead có cả CTCHead và NRTRHead, nhưng ở inference PaddleOCR chỉ sử dụng CTCHead + CTCLabelDecode.
+- CTCHead: gồm 1 layer fully-connected:
+```python
+  fc = nn.Linear(in_features=hidden_dim, out_features=Vocab_Size)
+```
+- Input tensor: [1, T=W', D]
+- Output tensor: [1, T, V]
+→ Đây là logit tensor, biểu diễn xác suất cho từng ký tự tại mỗi timestep.
+
+**Từ input [1, 3, 48, W] ra [1, T, V] như thế nào?**
+Từ Tensor → Feature Map
+Input Tensor
+  - Kích thước: [1, 3, 48, W]
+  - Là ảnh văn bản đã resize và normalize xong
+
+1. PPLCNetV3 – Feature Extraction
+- Mô hình CNN gồm các khối Conv + Activation
+- Các khối đầu giảm dần chiều cao → cuối cùng còn lại [B, C=120, 3, W']
+- Tức là: với chiều cao = 48 → mỗi cột output tương ứng là 1 rãnh dọc của ảnh văn bản
+  Mỗi cột W' → 1 vector đặc trưng cho ký tự tại vị trí đó
+Ý nghĩa: Giống như chia ảnh thành nhiều dải dọc (stripe) → mỗi stripe là 1 timestep tiềm năng.
+
+2. SVTR – Temporal Modeling
+Reshape + xử lý sequence
+  [B, C=120, 3, W'] → reshape → [B, W', C×3] = [B, W', 360]
+- SVTR xem chuỗi W' vector (360-dim) này là 1 chuỗi ký tự tiềm năng
+- Dùng:
+  - Conv → Local Attention
+  - Multi-head Self-Attention → nắm ngữ cảnh liên ký tự
+  - Feed Forward → encode semantic sâu hơn
+Hiểu đơn giản: SVTR hoạt động như 1 "Transformer for vision", giúp mô hình hiểu rằng:
+- "Stripe thứ 5 là “b” vì nó nằm giữa “a” và “c”"
+- "Stripe này là nét cong, stripe kia là nét thẳng..."
+
+3. CTCHead – Projection vào vocab
+- Từ output [B, W', 120] của SVTR → đưa qua fully-connected layer
+- FC này ánh xạ mỗi vector thành 1 phân phối xác suất:
+  nn.Linear(120 → Vocab_Size) ⇒ [B, T=W', V]
+→ Mỗi timestep T chứa 1 phân phối softmax trên toàn bộ vocab (gồm cả ký hiệu blank của CTC)
+
+**Dòng dữ liệu**
+[1, 3, 48, W]
+   ↓  (CNN: PPLCNetV3)
+[1, 120, 3, W']
+   ↓  (reshape)
+[1, W', 360]
+   ↓  (SVTR)
+[1, W', 120]
+   ↓  (FC layer - CTCHead)
+[1, W', Vocab_Size]  ← Logits
+
+#### 2.3.3 Recognition Postprocessing (CTCLabelDecode)
+**Mục tiêu**
+Chuyển đổi output tensor [1, T, V] từ mô hình recognition (logits) thành chuỗi văn bản thực tế, thông qua thuật toán CTC decoding.
+
+**Vai trò**
+- Logit chỉ là phân phối xác suất chưa có ý nghĩa ngôn ngữ.
+- Để tạo ra chuỗi ký tự có nghĩa (vd: "hello"), ta cần giải mã các timestep → ký tự → chuỗi hoàn chỉnh.
+
+**Pipeline nội bộ**
+[Logits: 1×T×V]  
+    ↓  
+[Softmax theo V] → xác suất ký tự tại mỗi timestep  
+    ↓  
+[CTC Decoding] (bỏ blank, gộp lặp)  
+    ↓  
+[Chuỗi ký tự + score]
+
+1. CTC Decoding là gì?
+**CTC = Connectionist Temporal Classification**
+- Được thiết kế để mapping sequence input → sequence output mà không cần alignment từng frame.
+- Trong OCR: ảnh có thể chứa "hello", nhưng model sẽ sinh chuỗi "hh_e_ll__o"
+  → CTC giúp loại bỏ blank + gộp lặp, suy ra "hello"
+
+2. Quy trình decoding chi tiết
+Giả sử output từ mô hình là tensor:
+  logits.shape = [1, T, V]  # V = vocab_size
+Bước 1: Softmax
+  probs = softmax(logits, dim=-1)
+→ probs[t, v]: xác suất tại timestep t là ký tự v
+
+Bước 2: Argmax
+  preds = probs.argmax(axis=-1)
+→ Chuỗi ID có độ dài T: mỗi timestep lấy ký tự có xác suất cao nhất
+
+Bước 3: Remove Duplicate + Blank
+- Gộp lặp liên tiếp: "lllooovv" → "lov"
+- Bỏ ký hiệu blank (thường là ID = 0)
+
+Ví dụ:
+
+| Timestep       |  1 |  2 |  3 |  4 |  5 |  6 |  7 |  8 |
+| -------------- | -: | -: | -: | -: | -: | -: | -: | -: |
+| Predict (ID)   |  _ |  h |  h |  _ |  e |  l |  l |  o |
+| Sau gộp lặp    |  _ |  h |  _ |  e |  l |  _ |  o |    |
+| Sau loại blank |  h |  e |  l |  o |    |    |    |    |
+
+→ Output: "helo"
+
+3. Mapping ID → char
+Dựa vào file ppocrv5_dict.txt để map ID → ký tự cụ thể.
+- Ví dụ:
+  0: 'ctc_blank'
+  1: 'a'
+  2: 'b'
+  ...
+  36: 'z'
+→ Ánh xạ ID thành chuỗi text cuối cùng.
+
+4. Confidence score
+- Tính confidence bằng cách lấy mean hoặc min của xác suất các ký tự đã giữ lại (sau decoding).
+- Cách thường dùng:
+  score = probs[range(T), pred_ids].mean()
+
+**Output cuối cùng**
+| Output Field | Kiểu dữ liệu | Ý nghĩa                                  |
+| ------------ | ------------ | ---------------------------------------- |
+| text         | `str`        | Chuỗi ký tự đã nhận diện (vd: `"hello"`) |
+| score        | `float`      | Confidence score cho toàn bộ chuỗi       |
+
