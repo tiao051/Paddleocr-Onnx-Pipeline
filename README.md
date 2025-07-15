@@ -784,4 +784,70 @@ Biến mỗi text patch (sau crop) thành tensor phù hợp với model recognit
 [Reformat to Tensor: [1, 3, 48, W]]
 
 ##### 1. Resize to Standard height
+**Mục tiêu**
+Chuyển mỗi ảnh text patch (với kích thước tuỳ ý) thành ảnh có chiều cao cố định = 48, trong khi giữ nguyên tỷ lệ khung hình (aspect ratio).
 
+**Vì sao phải resize về H = 48?**
+Không phải vì “model yêu cầu” một cách máy móc, mà vì bản thân kiến trúc của các recognition model như **CRNN**, **SVTR**, **Rosetta** được xây dựng dựa trên assumptions sau:
+
+###### 1.1 Text là sequence nằm ngang
+- Text trong thực tế (scene text, printed text) chủ yếu là chuỗi ký tự nằm ngang, ít khi dọc
+- Để tận dụng tính tuyến tính của ngôn ngữ → model cần ảnh có shape [height, width] với width tùy biến
+
+###### 1.2 Chiều cao cố định giúp mô hình học tốt
+- Recognition model có kiến trúc tổng quát:
+  [Input Image] → [CNN Backbone] → [Feature Map] → [Sequence Encoder (BiLSTM/Transformer)] → [CTC/FC]
+    - CNN backbone có nhiều tầng `stride = 2`, khiến chiều cao bị giảm dần qua từng tầng
+    - Nếu chiều cao ban đầu quá nhỏ → sau khi downsample sẽ thành **1** → mất sạch hình dạng chữ
+    - Nếu chiều cao quá lớn → model nặng, chậm, khó train
+
+**Chiều cao giảm qua các tầng CNN (stride 2):**
+
+| Tầng  | H input   | Stride | H feature  |
+| ----- | --------- | ------ | ---------- |
+| Input | 48        | –      | 48         |
+| Conv1 | 48        | 2      | 24         |
+| Conv2 | 24        | 2      | 12         |
+| Conv3 | 12        | 2      | 6          |
+| Conv4 | 6         | 2      | **3**      |
+
+- Với `H input = 48`, ta thu được `H feature = 3`  
+- Đây là mức tối thiểu để mô hình vẫn giữ được **các đặc trưng hình học dọc**
+
+**Ghi chú**
+- Nếu input cao hơn hoặc thấp hơn → các stroke chữ bị nát hoặc mất nét
+- Cụ thể:
+  - Vì ta encode ảnh thành sequence → mỗi column của feature map là 1 vector đại diện cho 1 "rãnh dọc" trên ảnh chữ (ví dụ: vector đại diện cho nét dọc chữ “b”, “h”, “i”, v.v.)
+  - Nếu H feature < 3:
+    - Mất nét dọc, các chữ có phần thẳng đứng bị biến mất (chữ “i” sẽ thành dấu chấm)
+    - Không còn “hình dạng chữ” để rec
+  - Nếu H feature = 1:
+    - Vector đầu ra chỉ là trung bình toàn bộ chiều dọc → mất sạch cấu trúc chữ cái
+
+**Tại sao không resize lên 64 hay 96?**
+  - Dù tăng H input giúp tăng độ phân giải chiều dọc → nhưng feature map cũng sẽ to hơn, dẫn đến:
+    - Model nặng hơn
+    - Inference chậm hơn
+    - Lãng phí nếu text không cần chi tiết cao
+→ H input = 48 là tối ưu giữa chi tiết vs compute
+- Thực nghiệm (trong cả paper và PaddleOCR config) cho thấy:
+  - Với H input = 48
+  → H_feature = 3
+  → Mỗi vector output [B, C, 3, T] giữ được:
+    - Stroke cao nhất (chữ dài như “h”, “b”)
+    - Stroke thấp nhất (chữ ngắn như “o”, “e”)
+    - Và trung tâm (chữ như “a”, “s”)
+  → Ba điểm dọc là đủ để mô hình “nhìn ra” form chữ
+
+**Resize như thế nào?**
+- Giữ nguyên tỷ lệ khung hình (aspect ratio)
+- Gọi h, w là chiều cao và rộng của patch
+- Tính chiều rộng mới: w' = (w.48)/h
+- Resize ảnh về (48, w')
+→ Tránh biến dạng chữ (e.g. chữ “i” thành “I” do co dãn sai)
+
+**Tóm tắt I/O**
+| Input                    | Output                    |
+|--------------------------|---------------------------|
+| Text patch `[h, w, 3]`   | `[48, w', 3]`             |
+| Condition `w'` có thể thay đổi theo tỷ lệ khung hình |
