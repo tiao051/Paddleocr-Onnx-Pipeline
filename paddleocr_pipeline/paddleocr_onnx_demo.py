@@ -9,8 +9,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)  # Go up one level from paddleocr_pipeline
 
 # Load models
-det_sess = ort.InferenceSession(os.path.join(project_root, "models", "det_model.onnx"))
-rec_sess = ort.InferenceSession(os.path.join(project_root, "models", "rec_model.onnx"))
+det_sess = ort.InferenceSession(os.path.join(project_root, "models", "det_model_v4.onnx"))
+rec_sess = ort.InferenceSession(os.path.join(project_root, "models", "rec_model_v4.onnx"))
 
 # Load image
 img = cv2.imread(os.path.join(project_root, "test", "test.jpg"))

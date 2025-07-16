@@ -37,6 +37,31 @@ def resize_and_normalize_ppocrv5(img, target_size=640):
     scale_w = new_w / original_w
     return input_tensor, (scale_h, scale_w), resized_img
 
+def analyze_detection_output(prob_map, model_version="v4"):
+    """
+    Analyze detection output to understand model behavior
+    """
+    print(f"\n🔬 Analyzing {model_version.upper()} detection output:")
+    print(f"   Shape: {prob_map.shape}")
+    print(f"   Min: {prob_map.min():.4f}")
+    print(f"   Max: {prob_map.max():.4f}")
+    print(f"   Mean: {prob_map.mean():.4f}")
+    print(f"   Std: {prob_map.std():.4f}")
+    
+    # Percentile analysis
+    percentiles = [5, 25, 50, 75, 95]
+    values = [np.percentile(prob_map, p) for p in percentiles]
+    print(f"   Percentiles: {dict(zip(percentiles, [f'{v:.4f}' for v in values]))}")
+    
+    # Histogram analysis
+    thresholds = [0.1, 0.3, 0.5, 0.7, 0.9]
+    for thresh in thresholds:
+        above_thresh = (prob_map > thresh).sum()
+        percentage = (above_thresh / prob_map.size) * 100
+        print(f"   > {thresh:.1f}: {above_thresh:6d} pixels ({percentage:5.1f}%)")
+    
+    return prob_map.min(), prob_map.max(), prob_map.mean()
+
 def run_detection_onnx(input_tensor: np.ndarray, model_path: str) -> np.ndarray:
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
@@ -95,15 +120,24 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
     
     return result_img
 
-def main():
+def main(model_version="v4", test_image="test1.jpg"):
     """
     Complete OCR detection pipeline:
     Image → Preprocessing → ONNX Detection → Postprocessing → Final Boxes
     """
-    image_path = "D:/Sozoo_Studio/v5_model/onnx_model/test/test1.jpg"  
-    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/det_model.onnx"  
+    # Dynamic path based on model version - use relative paths
+    image_path = f"test/{test_image}"
+    
+    if model_version == "v4":
+        model_path = "models/det_model_v4.onnx"
+    elif model_version == "v5":
+        model_path = "models/det_model_v5.onnx"
+    else:
+        raise ValueError(f"Unknown model version: {model_version}")
 
-    print("🚀 Starting complete OCR detection pipeline...")
+    print(f"🚀 Starting complete OCR detection pipeline ({model_version.upper()})...")
+    print(f"   📁 Model: {os.path.basename(model_path)}")
+    print(f"   📸 Image: {test_image}")
     print("=" * 60)
 
     # Step 1: Load image
@@ -127,12 +161,29 @@ def main():
     prob_map = pred_map[0, 0]  # (1, 1, H, W) -> (H, W)
     print(f"   Probability map shape: {prob_map.shape}")
     print(f"   Probability range: [{np.min(prob_map):.3f}, {np.max(prob_map):.3f}]")
+    
+    # Analyze detection output for debugging
+    analyze_detection_output(prob_map, model_version)
 
     # Step 4: Initialize postprocessor
     print("\n⚙️  Step 4: Initializing DB postprocessor...")
+    
+    # Adjust thresholds based on model version
+    if model_version == "v5":
+        # PP-OCRv5 model seems to have different output range
+        # Based on observed range [0.474, 0.626], use median as threshold
+        thresh = 0.55  # Slightly above median of observed range
+        box_thresh = 0.58  # Higher threshold for confidence
+        print(f"   🔧 Using PP-OCRv5 specific thresholds (adjusted for output range)")
+    else:
+        # PP-OCRv4 standard thresholds
+        thresh = 0.3
+        box_thresh = 0.6
+        print(f"   🔧 Using PP-OCRv4 standard thresholds")
+    
     postprocessor = DBPostProcessONNX(
-        thresh=0.3,           # Binary threshold (matches YAML)
-        box_thresh=0.6,       # Confidence threshold (matches YAML: 0.6)
+        thresh=thresh,        # Adjusted threshold based on model
+        box_thresh=box_thresh, # Adjusted confidence threshold
         max_candidates=1000,  # Max contours (matches YAML)
         unclip_ratio=1.5,     # Box expansion (matches YAML: 1.5)
         score_mode="fast",    # Fast scoring method
@@ -141,6 +192,9 @@ def main():
     print(f"   Binary threshold: {postprocessor.thresh}")
     print(f"   Confidence threshold: {postprocessor.box_thresh}")
     print(f"   Unclip ratio: {postprocessor.unclip_ratio}")
+    
+    if model_version == "v5":
+        print(f"   📝 Note: PP-OCRv5 model output range [0.474, 0.626] - thresholds adjusted")
 
     # Step 5: Run postprocessing
     print("\n🔍 Step 5: Running DB postprocessing...")
@@ -249,7 +303,7 @@ def main_no_preprocessing():
     nhưng KHÔNG normalize, KHÔNG chuẩn hóa mean/std như ImageNet.
     """
     image_path = "D:/Sozoo_Studio/v5_model/onnx_model/test/test.jpg"  
-    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/det_model.onnx"  
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/det_model_v4.onnx"  
 
     print("🚀 Running pipeline WITHOUT preprocessing...")
     print("=" * 60)
@@ -308,9 +362,10 @@ def main_no_preprocessing():
         'shape_info': (scale_h, scale_w)
     }
 
-def main_det_run():
+def main_det_run(model_version="v4", test_image="test1.jpg"):
+    """Main detection function called by main.py"""
     try:
-        result = main()
+        result = main(model_version, test_image)
         print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
         return result['image'], result['boxes']  # ✅ Return image + boxes
     except Exception as e:
@@ -318,6 +373,90 @@ def main_det_run():
         print("🔄 Running test with simulated data instead...")
         test_pipeline_with_sample()
         return None, None  # ✅ Trả về cặp None để tránh unpack lỗi
+
+def main_detection_only(image_path, model_path, model_version="v4"):
+    """
+    Detection only function for comparison script
+    Args:
+        image_path: Path to input image
+        model_path: Path to ONNX model
+        model_version: v4 or v5
+    Returns:
+        dict with detection results
+    """
+    print(f"🚀 Starting ONNX detection pipeline ({model_version.upper()})...")
+    print(f"   📁 Model: {os.path.basename(model_path)}")
+    print(f"   📸 Image: {os.path.basename(image_path)}")
+    print("=" * 60)
+
+    # Step 1: Load image
+    print("📸 Step 1: Loading image...")
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Cannot load image: {image_path}")
+    
+    original_h, original_w = img.shape[:2]
+    print(f"   Original image size: {original_w}x{original_h}")
+
+    # Step 2: Preprocess
+    print("\n🔧 Step 2: Preprocessing image...")
+    input_tensor, (scale_h, scale_w), resized_img = resize_and_normalize_ppocrv5(img)
+    print(f"   Input tensor shape: {input_tensor.shape}")
+    print(f"   Scale ratios: height={scale_h:.3f}, width={scale_w:.3f}")
+
+    # Step 3: Run detection ONNX
+    print("\n🧠 Step 3: Running ONNX detection model...")
+    pred_map = run_detection_onnx(input_tensor, model_path)
+    prob_map = pred_map[0, 0]  # (1, 1, H, W) -> (H, W)
+    print(f"   Probability map shape: {prob_map.shape}")
+    print(f"   Probability range: [{np.min(prob_map):.3f}, {np.max(prob_map):.3f}]")
+
+    # Step 4: Initialize postprocessor
+    print("\n⚙️  Step 4: Initializing DB postprocessor...")
+    
+    # Adjust thresholds based on model version
+    if model_version == "v5":
+        # PP-OCRv5 model seems to have different output range
+        thresh = 0.3  # Use YAML config value
+        box_thresh = 0.6  # Use YAML config value
+    else:
+        # PP-OCRv4 standard thresholds
+        thresh = 0.3
+        box_thresh = 0.6
+    
+    postprocessor = DBPostProcessONNX(
+        thresh=thresh,
+        box_thresh=box_thresh,
+        max_candidates=1000,
+        unclip_ratio=1.5,
+        score_mode="fast",
+        box_type='quad'
+    )
+    print(f"   Binary threshold: {postprocessor.thresh}")
+    print(f"   Confidence threshold: {postprocessor.box_thresh}")
+    print(f"   Unclip ratio: {postprocessor.unclip_ratio}")
+
+    # Step 5: Run postprocessing
+    print("\n🔍 Step 5: Running DB postprocessing...")
+    shape_info = [scale_h, scale_w]
+    boxes, scores = postprocessor(pred_map, shape_info)
+    
+    print(f"   Detected boxes: {len(boxes)}")
+    if len(boxes) > 0:
+        print(f"   Confidence scores: {[f'{s:.3f}' for s in scores]}")
+    else:
+        print("   ⚠️  No text boxes detected")
+
+    print("✅ Pipeline completed successfully!")
+    print("=" * 60)
+    
+    return {
+        'image': img,
+        'probability_map': prob_map,
+        'boxes': boxes,
+        'scores': scores,
+        'shape_info': shape_info
+    }
     # try:
     #     result = main_no_preprocessing()
     #     print(f"✅ Test done: {len(result['boxes'])} text regions detected (without preprocessing)")
