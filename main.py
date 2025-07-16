@@ -57,7 +57,7 @@ def run_crop(img, raw_boxes, save_debug=True):
 
 def run_recognition(crops):
     print("[3/4] Running recognition...")
-    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/rec_model.onnx"
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Recognition model not found: {model_path}")
 

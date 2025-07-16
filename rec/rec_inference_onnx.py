@@ -77,7 +77,7 @@ class RecognitionONNX:
         possible_paths = [
             "utils/char_dic.txt",
             "../utils/char_dic.txt", 
-            "d:/Sozoo_Studio/v4_model/onnx_model/utils/char_dic.txt",
+            "d:/Sozoo_Studio/v5_model/onnx_model/utils/char_dic.txt",
             "./ppocr/utils/dict/ppocrv5_dict.txt",
             "ppocr/utils/dict/ppocrv5_dict.txt"
         ]
@@ -271,7 +271,7 @@ def test_recognition_onnx():
     print("=" * 60)
     
     # Initialize recognizer
-    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/rec_model.onnx"
     
     # Check if model exists, if not try relative path
     if not os.path.exists(model_path):
@@ -292,7 +292,7 @@ def test_recognition_onnx():
     test_image_paths = [
         "test/test.jpg",
         "test.jpg", 
-        "D:/Sozoo_Studio/v4_model/onnx_model/test/test.jpg",
+        "D:/Sozoo_Studio/v5_model/onnx_model/test/test.jpg",
         "../test/test.jpg"
     ]
     
@@ -401,7 +401,7 @@ def demo_with_cropped_images():
     print("=" * 60)
     
     # Initialize recognizer - fix path
-    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/rec_model.onnx"
     
     # Check if model exists, if not try relative paths
     if not os.path.exists(model_path):
@@ -497,7 +497,7 @@ def test_synthetic_text():
         print(f"   📐 Image shape: {img_array.shape}")
         
         # Test recognition
-        model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+        model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/rec_model.onnx"
         if not os.path.exists(model_path):
             model_path = "models/rec_model.onnx"
         
@@ -527,7 +527,7 @@ def test_with_real_image():
     print("\n🧪 Testing with real test image...")
     
     # Initialize recognizer
-    model_path = "D:/Sozoo_Studio/v4_model/onnx_model/models/rec_model.onnx"
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/rec_model.onnx"
     if not os.path.exists(model_path):
         model_path = "models/rec_model.onnx"
     
@@ -537,7 +537,7 @@ def test_with_real_image():
     test_image_paths = [
         "test/test.jpg",
         "test.jpg",
-        "D:/Sozoo_Studio/v4_model/onnx_model/test/test.jpg",
+        "D:/Sozoo_Studio/v5_model/onnx_model/test/test.jpg",
         "../test/test.jpg"
     ]
     
