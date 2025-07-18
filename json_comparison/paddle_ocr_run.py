@@ -9,7 +9,7 @@ input_dir = r"D:\Sozoo_Studio\v5_model\onnx_model\images"
 output_dir = r"D:\Sozoo_Studio\v5_model\onnx_model\paddle_output"
 os.makedirs(output_dir, exist_ok=True)
 
-img_file = "chinese_test4.jpg"
+img_file = "eng_test1.jpg"
 valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
 
 # --- KIỂM TRA TÊN FILE ---
