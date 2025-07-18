@@ -125,15 +125,11 @@ def main(model_version="v4", test_image="test1.jpg"):
     Complete OCR detection pipeline:
     Image → Preprocessing → ONNX Detection → Postprocessing → Final Boxes
     """
-    # Dynamic path based on model version - use relative paths
+    # Dynamic path based on model version - now using generic model name
     image_path = f"test/{test_image}"
     
-    if model_version == "v4":
-        model_path = "models/det_model_v4.onnx"
-    elif model_version == "v5":
-        model_path = "models/det_model_v5.onnx"
-    else:
-        raise ValueError(f"Unknown model version: {model_version}")
+    # Use generic model name for all versions
+    model_path = "models/det_model.onnx"
 
     print(f"🚀 Starting complete OCR detection pipeline ({model_version.upper()})...")
     print(f"   📁 Model: {os.path.basename(model_path)}")
@@ -303,7 +299,7 @@ def main_no_preprocessing():
     nhưng KHÔNG normalize, KHÔNG chuẩn hóa mean/std như ImageNet.
     """
     image_path = "D:/Sozoo_Studio/v5_model/onnx_model/test/test.jpg"  
-    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/det_model_v4.onnx"  
+    model_path = "D:/Sozoo_Studio/v5_model/onnx_model/models/det_model.onnx"  # Updated to use generic model
 
     print("🚀 Running pipeline WITHOUT preprocessing...")
     print("=" * 60)

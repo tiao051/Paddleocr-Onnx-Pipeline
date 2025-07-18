@@ -48,7 +48,7 @@ class RecognitionONNX:
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [output.name for output in self.session.get_outputs()]
         
-        print(f"✅ ONNX Recognition model loaded: {model_path}")
+        print(f"   ONNX Recognition model loaded: {model_path}")
         print(f"   Input: {self.input_name}")
         print(f"   Outputs: {self.output_names}")
         print(f"   Providers: {providers}")

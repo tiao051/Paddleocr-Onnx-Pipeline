@@ -13,8 +13,8 @@ SELECTED_TEST_IMAGE = "test1.jpg"
 def choose_model_version():
     """Interactive model version selection"""
     print("\n🔧 Choose Model Version:")
-    print("1. PP-OCRv4 Models (det_model_v4.onnx, rec_model_v4.onnx)")
-    print("2. PP-OCRv5 Models (det_model.onnx, rec_model.onnx)")
+    print("1. PP-OCRv4 Models (using det_model.onnx, rec_model.onnx)")
+    print("2. PP-OCRv5 Models (using det_model.onnx, rec_model.onnx)")
     
     while True:
         try:
@@ -75,19 +75,12 @@ def choose_test_image():
             exit(0)
 
 def get_model_paths(version):
-    """Get model paths based on version"""
-    if version == "v4":
-        return {
-            "det_model": "models/det_model_v4.onnx",
-            "rec_model": "models/rec_model_v4.onnx"
-        }
-    elif version == "v5":
-        return {
-            "det_model": "models/det_model_v5.onnx",  # Fixed: should be det_model_v5.onnx
-            "rec_model": "models/rec_model_v5.onnx"   # Fixed: should be rec_model_v5.onnx
-        }
-    else:
-        raise ValueError(f"Unknown model version: {version}")
+    """Get model paths based on version - now using generic model names"""
+    # Use generic model names for both versions
+    return {
+        "det_model": "models/det_model.onnx",
+        "rec_model": "models/rec_model.onnx"
+    }
 
 def setup_test_configuration():
     """Setup test configuration - choose model and image"""
