@@ -37,11 +37,11 @@ def resize_and_normalize_ppocrv5(img, target_size=640):
     scale_w = new_w / original_w
     return input_tensor, (scale_h, scale_w), resized_img
 
-def analyze_detection_output(prob_map, model_version="v4"):
+def analyze_detection_output(prob_map):
     """
     Analyze detection output to understand model behavior
     """
-    print(f"\n🔬 Analyzing {model_version.upper()} detection output:")
+    print(f"\n🔬 Analyzing detection output:")
     print(f"   Shape: {prob_map.shape}")
     print(f"   Min: {prob_map.min():.4f}")
     print(f"   Max: {prob_map.max():.4f}")
@@ -120,18 +120,18 @@ def visualize_detection_results(img: np.ndarray, boxes: list, scores: list, save
     
     return result_img
 
-def main(model_version="v4", test_image="test1.jpg"):
+def main(test_image="eng_test1.jpg"):
     """
     Complete OCR detection pipeline:
     Image → Preprocessing → ONNX Detection → Postprocessing → Final Boxes
     """
-    # Dynamic path based on model version - now using generic model name
-    image_path = f"test/{test_image}"
+    # Dynamic path based on images folder
+    image_path = f"images/{test_image}"
     
-    # Use generic model name for all versions
+    # Use generic model name
     model_path = "models/det_model.onnx"
 
-    print(f"🚀 Starting complete OCR detection pipeline ({model_version.upper()})...")
+    print(f"🚀 Starting complete OCR detection pipeline...")
     print(f"   📁 Model: {os.path.basename(model_path)}")
     print(f"   📸 Image: {test_image}")
     print("=" * 60)
@@ -159,27 +159,19 @@ def main(model_version="v4", test_image="test1.jpg"):
     print(f"   Probability range: [{np.min(prob_map):.3f}, {np.max(prob_map):.3f}]")
     
     # Analyze detection output for debugging
-    analyze_detection_output(prob_map, model_version)
+    analyze_detection_output(prob_map)
 
     # Step 4: Initialize postprocessor
     print("\n⚙️  Step 4: Initializing DB postprocessor...")
     
-    # Adjust thresholds based on model version
-    if model_version == "v5":
-        # PP-OCRv5 model seems to have different output range
-        # Based on observed range [0.474, 0.626], use median as threshold
-        thresh = 0.55  # Slightly above median of observed range
-        box_thresh = 0.58  # Higher threshold for confidence
-        print(f"   🔧 Using PP-OCRv5 specific thresholds (adjusted for output range)")
-    else:
-        # PP-OCRv4 standard thresholds
-        thresh = 0.3
-        box_thresh = 0.6
-        print(f"   🔧 Using PP-OCRv4 standard thresholds")
+    # Use standard thresholds
+    thresh = 0.3
+    box_thresh = 0.6
+    print(f"   🔧 Using standard thresholds")
     
     postprocessor = DBPostProcessONNX(
-        thresh=thresh,        # Adjusted threshold based on model
-        box_thresh=box_thresh, # Adjusted confidence threshold
+        thresh=thresh,        # Standard threshold
+        box_thresh=box_thresh, # Standard confidence threshold
         max_candidates=1000,  # Max contours (matches YAML)
         unclip_ratio=1.5,     # Box expansion (matches YAML: 1.5)
         score_mode="fast",    # Fast scoring method
@@ -188,9 +180,6 @@ def main(model_version="v4", test_image="test1.jpg"):
     print(f"   Binary threshold: {postprocessor.thresh}")
     print(f"   Confidence threshold: {postprocessor.box_thresh}")
     print(f"   Unclip ratio: {postprocessor.unclip_ratio}")
-    
-    if model_version == "v5":
-        print(f"   📝 Note: PP-OCRv5 model output range [0.474, 0.626] - thresholds adjusted")
 
     # Step 5: Run postprocessing
     print("\n🔍 Step 5: Running DB postprocessing...")
@@ -358,10 +347,10 @@ def main_no_preprocessing():
         'shape_info': (scale_h, scale_w)
     }
 
-def main_det_run(model_version="v4", test_image="test1.jpg"):
+def main_det_run(test_image="eng_test1.jpg"):
     """Main detection function called by main.py"""
     try:
-        result = main(model_version, test_image)
+        result = main(test_image)
         print(f"✅ Successfully processed image with {len(result['boxes'])} text regions detected!")
         return result['image'], result['boxes']  # ✅ Return image + boxes
     except Exception as e:

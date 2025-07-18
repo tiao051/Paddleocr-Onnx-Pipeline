@@ -1,43 +1,17 @@
-"""
-PP-OCRv5 Mobile Recognition ONNX Inference
-Complete pipeline: preprocessing → ONNX inference → postprocessing
-
-Usage:
-    from rec_inference_onnx import RecognitionONNX
-    recognizer = RecognitionONNX("rec_model.onnx")
-    text = recognizer.recognize(image)
-"""
-
 import cv2
 import numpy as np
 import onnxruntime as ort
 import os
+import scipy.special
 from typing import Union, List, Tuple
 from rec.rec_preprocessing_onnx import preprocess_ppocrv5, preprocess_ppocrv5_batch
 
 
 class RecognitionONNX:
-    """
-    PP-OCRv5 Recognition ONNX Inference Class
-    
-    Complete pipeline:
-    1. Preprocessing (resize, normalize, padding)
-    2. ONNX model inference 
-    3. Postprocessing (decode predictions to text)
-    """
-    
     def __init__(self, 
                  model_path: str,
                  char_dict_path: str = None,
                  providers: List[str] = None):
-        """
-        Initialize PP-OCRv5 Recognition ONNX model
-        
-        Args:
-            model_path: Path to rec_model.onnx
-            char_dict_path: Path to character dictionary (optional)
-            providers: ONNX providers (default: ["CPUExecutionProvider"])
-        """
         self.model_path = model_path
         
         # Initialize ONNX session
@@ -57,15 +31,6 @@ class RecognitionONNX:
         self.char_dict = self._load_char_dict(char_dict_path)
         
     def _load_char_dict(self, char_dict_path: str = None) -> List[str]:
-        """
-        Load character dictionary for text decoding
-        
-        Args:
-            char_dict_path: Path to character dictionary file
-            
-        Returns:
-            List of characters for decoding
-        """
         # Try to load from provided path first
         if char_dict_path and os.path.exists(char_dict_path):
             with open(char_dict_path, 'r', encoding='utf-8') as f:
@@ -114,15 +79,6 @@ class RecognitionONNX:
         return ['blank'] + chars  # Add blank token for CTC
     
     def _run_inference(self, input_tensor: np.ndarray) -> np.ndarray:
-        """
-        Run ONNX inference on preprocessed tensor
-        
-        Args:
-            input_tensor: Preprocessed image tensor (B, C, H, W)
-            
-        Returns:
-            Model predictions (B, T, num_classes)
-        """
         # Ensure correct input format
         if input_tensor.dtype != np.float32:
             input_tensor = input_tensor.astype(np.float32)
@@ -136,102 +92,126 @@ class RecognitionONNX:
         # Return first output (predictions)
         return outputs[0]
     
-    def _decode_predictions(self, predictions: np.ndarray, verbose: bool = False) -> List[str]:
-        """
-        Decode CTC predictions to text strings
-        
-        Args:
-            predictions: Model output (B, T, num_classes)
-            verbose: Print debug information
-            
-        Returns:
-            List of recognized text strings
-        """
+    def _decode_predictions(self, predictions: np.ndarray, verbose: bool = False) -> List[Tuple[str, float]]:
         batch_size = predictions.shape[0]
         results = []
         
         if verbose:
-            print(f"   🔍 Predictions shape: {predictions.shape}")
-            print(f"   🔍 Character dict size: {len(self.char_dict)}")
+            print(f"   🔍 DEBUG: Starting CTC decoding...")
+            print(f"   🔍 DEBUG: Predictions shape: {predictions.shape}")
+            print(f"   🔍 DEBUG: Character dict size: {len(self.char_dict)}")
+            print(f"   🔍 DEBUG: Predictions min/max: [{predictions.min():.3f}, {predictions.max():.3f}]")
+            print(f"   🔍 DEBUG: First few chars in dict: {self.char_dict[:10]}")
         
         for i in range(batch_size):
             pred = predictions[i]  # (T, num_classes)
-            
-            # Get character indices (argmax)
             char_indices = np.argmax(pred, axis=1)  # (T,)
+            max_probs = np.max(pred, axis=1)  # Confidence for each time step
             
-            if verbose:
-                print(f"   🔍 Sequence length: {len(char_indices)}")
-                print(f"   🔍 Unique indices: {np.unique(char_indices)[:10]}...")  # Show first 10
-                print(f"   🔍 Max confidence: {np.max(pred):.3f}")
-            
-            # CTC decoding: remove blanks and consecutive duplicates
             decoded_chars = []
+            decoded_probs = []
             prev_char = None
             
-            for char_idx in char_indices:
+            for j, char_idx in enumerate(char_indices):
                 if char_idx == 0:  # Skip blank token
                     prev_char = None
                     continue
-                    
                 if char_idx != prev_char:  # Remove consecutive duplicates
                     if char_idx < len(self.char_dict):
                         decoded_chars.append(self.char_dict[char_idx])
-                        if verbose and len(decoded_chars) <= 5:  # Show first few chars
-                            print(f"   🔍 Decoded char: {char_idx} → '{self.char_dict[char_idx]}'")
+                        decoded_probs.append(max_probs[j])
+                        if verbose and i < 3 and len(decoded_chars) <= 3:
+                            print(f"      Step {j}: idx={char_idx} → '{self.char_dict[char_idx]}' (conf={max_probs[j]:.3f})")
+                    else:
+                        if verbose and i < 3:
+                            print(f"      ⚠️  Invalid char index {char_idx} >= {len(self.char_dict)}")
                     prev_char = char_idx
             
-            # Join characters to form text
             text = ''.join(decoded_chars)
-            results.append(text)
+            # Confidence score: mean of decoded character probabilities, 0.0 if empty
+            confidence = float(np.mean(decoded_probs)) if decoded_probs else 0.0
+            results.append((text, confidence))
             
-            if verbose:
-                print(f"   🔍 Final text: '{text}' (length: {len(text)})")
-            
+            if verbose and i < 3:
+                print(f"      Decoded chars: {decoded_chars}")
+                print(f"      Final text: '{text}' (length: {len(text)})")
+                print(f"      Confidence score: {confidence:.3f}")
+                if not text:
+                    print(f"      ⚠️  Empty text result!")
+                    non_blank_indices = char_indices[char_indices != 0]
+                    print(f"      ⚠️  Non-blank indices: {non_blank_indices}")
+                    if len(non_blank_indices) == 0:
+                        print(f"      ⚠️  NO NON-BLANK PREDICTIONS! Model is predicting all blanks.")
+        
+        if verbose:
+            empty_count = sum(1 for text, _ in results if not text)
+            print(f"   🔍 DEBUG: Total empty results: {empty_count}/{len(results)}")
+            if empty_count == len(results):
+                print(f"   ⚠️  CRITICAL: ALL RESULTS ARE EMPTY!")
+                print(f"   ⚠️  This suggests a serious problem with:")
+                print(f"      1. Model predictions (all blank)")
+                print(f"      2. CTC decoding logic")
+                print(f"      3. Character dictionary mapping")
+                print(f"      4. Input preprocessing")
+        
         return results
     
     def recognize(self, image_input: Union[str, np.ndarray]) -> str:
-        """
-        Recognize text from single image
-        
-        Args:
-            image_input: Image path or numpy array
-            
-        Returns:
-            Recognized text string
-        """
+
         # Preprocessing
         input_tensor = preprocess_ppocrv5(image_input)
+        
+        # 🔍 DEBUG: In ra input tensor info
+        print(f"🔍 Input tensor shape: {input_tensor.shape}")
+        print(f"🔍 Input tensor range: [{input_tensor.min():.3f}, {input_tensor.max():.3f}]")
+        print(f"🔍 Input tensor dtype: {input_tensor.dtype}")
         
         # ONNX inference
         predictions = self._run_inference(input_tensor)
         
+        # 🔍 DEBUG: In ra prediction info
+        print(f"🔍 Predictions shape: {predictions.shape}")
+        print(f"🔍 Predictions range: [{predictions.min():.3f}, {predictions.max():.3f}]")
+        print(f"🔍 Predictions dtype: {predictions.dtype}")
+        
+        # Sample some values from predictions
+        if predictions.size > 0:
+            print(f"🔍 First few prediction values: {predictions[0, :5, :5]}")
+        
         # Postprocessing
         texts = self._decode_predictions(predictions, verbose=True)
-        
-        return texts[0] if texts else ""
     
+        return texts[0] if texts else ""
+
     def recognize_batch(self, image_list: List[Union[str, np.ndarray]]) -> List[str]:
-        """
-        Recognize text from multiple images (batch processing)
-        
-        Args:
-            image_list: List of image paths or numpy arrays
-            
-        Returns:
-            List of recognized text strings
-        """
         if not image_list:
             return []
         
+        print(f"debug: processing batch of {len(image_list)} images")
         # Batch preprocessing
         batch_tensor, indices = preprocess_ppocrv5_batch(image_list)
+        
+        print(f"🔍 DEBUG: Batch tensor shape: {batch_tensor.shape}")
+        print(f"🔍 DEBUG: Batch tensor range: [{batch_tensor.min():.3f}, {batch_tensor.max():.3f}]")
+        print(f"🔍 DEBUG: Batch tensor dtype: {batch_tensor.dtype}")
         
         # ONNX inference
         predictions = self._run_inference(batch_tensor)
         
+        print(f"🔍 DEBUG: Batch predictions shape: {predictions.shape}")
+        print(f"🔍 DEBUG: Batch predictions range: [{predictions.min():.3f}, {predictions.max():.3f}]")
+        print(f"🔍 DEBUG: Batch predictions dtype: {predictions.dtype}")
+        if predictions.size > 0:
+            print(f"🔍 DEBUG: First prediction sample: {predictions[0, :5, :5]}")
+    
+        # Postprocessing with verbose for first few samples
+        print(f"🔍 DEBUG: Starting CTC decoding...")
         # Postprocessing
         texts = self._decode_predictions(predictions)
+        
+        print(f"🔍 DEBUG: Decoded {len(texts)} texts")
+        for i, text in enumerate(texts[:3]):  # Show first 3 results
+            print(f"🔍 DEBUG: Text {i+1}: '{text}'")
         
         # Restore original order
         sorted_texts = [''] * len(image_list)
@@ -242,12 +222,6 @@ class RecognitionONNX:
         return sorted_texts
     
     def get_model_info(self) -> dict:
-        """
-        Get model information
-        
-        Returns:
-            Dictionary with model details
-        """
         input_shape = self.session.get_inputs()[0].shape
         output_shapes = [output.shape for output in self.session.get_outputs()]
         
@@ -263,9 +237,6 @@ class RecognitionONNX:
 
 
 def test_recognition_onnx():
-    """
-    Test function for PP-OCRv5 Recognition ONNX with real test.jpg image and visualize results
-    """
     print("=" * 60)
     print("TESTING PP-OCRv5 RECOGNITION ONNX WITH VISUALIZATION")
     print("=" * 60)
