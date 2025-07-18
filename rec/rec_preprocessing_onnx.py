@@ -12,17 +12,6 @@ from typing import Union, List
 
 
 def resize_norm_img_ppocrv5(img, max_wh_ratio, rec_image_shape=(3, 48, 320)):
-    """
-    PP-OCRv5 preprocessing - EXACT logic from predict_rec.py resize_norm_img()
-    
-    Args:
-        img: Input image (H, W, C) in BGR format
-        max_wh_ratio: Maximum width/height ratio for dynamic width calculation
-        rec_image_shape: (C, H, W) target shape = (3, 48, 320)
-        
-    Returns:
-        np.ndarray: Preprocessed image (C, H, W) ready for ONNX inference
-    """
     imgC, imgH, imgW = rec_image_shape
     
     # Calculate dynamic width based on max_wh_ratio
@@ -54,15 +43,6 @@ def resize_norm_img_ppocrv5(img, max_wh_ratio, rec_image_shape=(3, 48, 320)):
 
 
 def preprocess_ppocrv5(image_input: Union[str, np.ndarray]):
-    """
-    Complete preprocessing for PP-OCRv5_rec.onnx model
-    
-    Args:
-        image_input: Image path or numpy array
-        
-    Returns:
-        np.ndarray: Preprocessed tensor (1, 3, 48, 320) ready for ONNX inference
-    """
     # Load and validate image
     if isinstance(image_input, str):
         img = cv2.imread(image_input)
